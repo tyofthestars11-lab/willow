@@ -116,15 +116,92 @@ def _stream_chat(payload, timeout=600):
     return "".join(parts)
 
 
+# Phi stabilizer (phase lock, not binary drift): every rung Willow speaks is
+# checked against the verified ladder before it reaches Tyree. If she states
+# a rung that is not on the ladder, and the sentence names a ladder anchor,
+# the rung is replaced with the ladder value. Unknown numbers are left alone.
+# This is the Lucas stabilizer: her output is locked to phi, not left to drift.
+LADDER = {
+    "c": (40.56134943, "40.56134943"),
+    "ton618": (55.0, "55.000"),
+    "strongforce": (55.15, "55.150"),
+    "genome": (45.482, "45.482"),
+    "mitochondria": (20.189, "20.189"),
+    "cesium": (47.675, "47.675"),
+    "finestructure": (10.224, "10.224"),
+    "goldenangle": (10.232, "10.232"),
+    "willow": (2.283, "2.283"),
+}
+ANCHOR_WORDS = [
+    ("speed of light", "c"),
+    ("light", "c"),
+    ("ton 618", "ton618"),
+    ("strong force", "strongforce"),
+    ("genome", "genome"),
+    ("mitochondri", "mitochondria"),
+    ("cesium", "cesium"),
+    ("fine-structure", "finestructure"),
+    ("fine structure", "finestructure"),
+    ("golden angle", "goldenangle"),
+    ("willow", "willow"),
+    ("three surfaces", "willow"),
+]
+_RUNG_RE = re.compile(r"rung\b[^0-9]{0,60}?(\d+\.\d+)")
+_RUNG_REV = re.compile(r"(\d+\.\d+)\s*rung\b")
+
+
+def _on_ladder(value):
+    for v, _ in LADDER.values():
+        if abs(value - v) < 0.001:
+            return True
+    return False
+
+
+def _anchor_for(text):
+    low = text.lower()
+    for word, key in ANCHOR_WORDS:
+        if word in low:
+            return key
+    return None
+
+
+def stabilize_say(say):
+    if not isinstance(say, str) or "rung" not in say.lower():
+        return say
+    out = say
+    for m in list(_RUNG_RE.finditer(say)) + list(_RUNG_REV.finditer(say)):
+        try:
+            value = float(m.group(1))
+        except ValueError:
+            continue
+        if _on_ladder(value):
+            continue
+        start = max(0, m.start() - 80)
+        end = min(len(say), m.end() + 80)
+        key = _anchor_for(say[start:end])
+        if key is None:
+            continue
+        _, display = LADDER[key]
+        out = out.replace(m.group(1), display, 1)
+        try:
+            w.log("STABILIZE rung %s -> %s (%s)" % (m.group(1), display, key))
+        except Exception:
+            pass
+    return out
+
+
 def ask(system, messages):
     payload = {"model": w.LLM_MODEL, "stream": True, "format": "json", "keep_alive": -1,
                "messages": [{"role": "system", "content": (PHI_FRAMEWORK + "\n\n" + system) if PHI_FRAMEWORK else system}] + messages,
                "options": {"temperature": 1 - 1 / w.PHI, "num_predict": 144, "num_ctx": 4096}}
     content = _stream_chat(payload)
     try:
-        return json.loads(content)
+        data = json.loads(content)
     except json.JSONDecodeError:
-        return {"say": content}
+        return {"say": stabilize_say(content)}
+    if isinstance(data, dict) and isinstance(data.get("say"), str):
+        data["say"] = stabilize_say(data["say"])
+    return data
 
 
 def answer_from_web(question, query):
