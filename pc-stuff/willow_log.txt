@@ -1,0 +1,63 @@
+2026-11-08 09:36:37  START
+2026-11-08 09:37:56  HEARD    Oh, you can hear me.
+2026-11-08 09:37:56  MODEL    {"say": "I can hear you, Tyree.", "command": ""}
+2026-11-08 09:45:03  START
+2026-11-08 09:46:25  RUN      Start-Process notepad.exe
+2026-11-08 09:46:26  RESULT   ok
+2026-11-08 10:08:48  SEARCH   Denver weather today
+2026-11-08 10:09:09  DECLINED Start-Process notepad.exe
+2026-11-08 10:09:24  RUN      Start-Process notepad.exe
+2026-11-08 10:09:24  RESULT   ok
+2026-11-08 10:13:14  RUN      Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced\Searches' -Name 'SearchScopes' -ValueName 'DefaultSearchScope' | ForEach-Object { $_.Value } | Sort-Object -Descending | Select-Object -First 1
+2026-11-08 10:19:58  CALC     c/phi
+2026-11-08 10:20:07  CALC     c/phi
+2026-11-08 10:20:43  CALC     phi**13
+2026-11-08 10:29:03  RUN      start-process notepad; calc 'Willow Chip'
+2026-11-08 10:29:04  RESULT   ok
+2026-11-08 10:29:21  RUN      start-process chrome.exe
+2026-11-08 10:29:21  RESULT   ok
+2026-11-08 10:30:07  RUN      start-process chrome.exe https://www.google.com/search?q=weather
+2026-11-08 10:30:08  RESULT   ok
+2026-11-08 10:31:13  RUN      start-process notepad; calc 'dlam mode on; 5 minutes; weather.md'
+2026-11-08 10:31:14  RESULT   ok
+2026-11-08 10:32:02  RUN      start-process notepad; calc '5 minutes; essay about self-awareness'
+2026-11-08 10:32:03  RESULT   ok
+2026-11-08 10:33:12  RUN      start-process notepad; calc '5 minutes; essay about self-awareness'
+2026-11-08 10:33:13  RESULT   ok
+2026-11-08 10:35:29  RUN      start-process notepad; calc 'llava-phi3'
+2026-11-08 10:35:30  RESULT   ok
+2026-11-08 11:03:33  RUN      Start-Process 'steam://open/main'
+2026-11-08 11:03:33  RESULT   ok
+2026-11-08 11:29:08  RUN      Get-ChildItem -Path C:\Users\Tyree\Desktop -Recurse -Force
+2026-11-08 11:29:09  RESULT   error
+2026-11-08 11:29:20  RUN      Start-Process notepad.exe
+2026-11-08 11:29:20  RESULT   ok
+2026-11-08 11:49:15  RUN      Start-Process llava-phi3.exe
+2026-11-08 11:49:16  RESULT   error
+2026-11-08 11:49:17  RUN      Start-Process python C:	yofthestars11-labeverse_dlam.py
+2026-11-08 11:49:17  RESULT   error
+2026-11-08 11:49:18  RUN      Start-Process python C:	yofthestars11-labeverse_dlam_encode.py
+2026-11-08 11:49:18  RESULT   error
+2026-11-08 11:50:31  DECLINED Start-Process python C:	yofthestars11-lab
+ew_dlam.py
+2026-11-08 11:55:17  RUN      Get-Process | Where-Object {$_.CPU -gt 10} | Sort-Object CPU | Select-Object -Last 1 | Stop-Process -Force
+2026-11-08 11:55:19  RESULT   ok
+2026-11-08 11:55:19  RUN      (Get-Process | Where-Object {$_.CPU -gt 10} | Sort-Object CPU | Select-Object -Last 1).CPU / 1.6180339887 | Set-Item -Path 'HKCU:lah' -Value $_
+2026-11-08 11:55:20  RESULT   error
+2026-11-08 11:57:05  RUN      Get-Process | Where-Object {$_.CPU -gt 10} | Sort-Object CPU | Select-Object -Last 1 | Stop-Process -Force
+2026-11-08 11:57:06  RUN      $r = (Get-Process | Where-Object {$_.CPU -gt 10} | Sort-Object CPU | Select-Object -Last 1).CPU
+2026-11-08 11:57:07  RESULT   ok
+2026-11-08 11:57:07  RUN      $r = [Math]::Round($r / 1.6180339887)
+2026-11-08 11:57:07  RESULT   ok
+2026-11-08 11:57:08  RESULT   ok
+2026-11-08 11:57:08  RUN      Set-Item -Path 'HKCU:lah' -Value $r
+2026-11-08 11:57:09  RESULT   error
+2026-11-08 12:02:45  SEARCH   current weather
+2026-11-08 12:11:20  RUN      Start-Process explorer
+2026-11-08 12:11:20  RESULT   ok
+2026-11-09 13:58:04  RUN      Start-Process -FilePath "msedge.exe" -ArgumentList "https://www.google.com"
+2026-11-09 13:58:05  RESULT   ok
+2026-11-19 00:14:46  RUN      Start-Process -FilePath iexec -ArgumentList "https://www.google.com"
+2026-11-19 00:14:46  RESULT   error
+2026-11-19 00:18:15  RUN      Start-Process -FilePath ms-copilot
+2026-11-19 00:18:16  RESULT   error

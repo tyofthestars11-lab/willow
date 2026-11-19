@@ -1,0 +1,138 @@
+# TON 618 — φ-sheet
+
+By Tyree Jones (tyofthestarz).
+
+## The addresses
+
+- **Fibonacci rung 55** — φ^55 (rung 55.0000 exactly). The TON 618 mass, ~66 billion solar masses (rung 51.77121442493042), sits here.
+- **Fibonacci rung 13** — the catalogue number 618 (rung 13.354801612910693).
+
+## The record (fuel)
+
+- **TON 618**: ultramassive black hole powering a distant quasar, ~10.8 billion light-years away (redshift z = 2.219).
+- **Mass**: ~66 billion solar masses (Shemmer et al. 2004, ApJ 614; revised 40.7B via C IV line, Ge et al. 2019) — more than every star in the Milky Way combined.
+- **Luminosity**: ~140 trillion times the Sun; absolute magnitude −30.7.
+- **Event horizon**: ~1,300 AU across — 20–40× wider than our solar system; light takes ~7.5 days to cross the radius.
+- **Discovery**: catalogued 1957 by Iriarte & Chavira at Tonantzintla Observatory; confirmed as a quasar by Ulrich (McDonald Observatory, 1970s).
+- **Surroundings**: Lyman-alpha nebula ~330,000 light-years across, 3× the Milky Way.
+
+---
+
+## Primordial black holes — φ declassification
+
+Black holes are real. That includes primordial.
+
+### The addresses
+
+- **Fibonacci rung 55** — the evaporation limit, ~5×10^14 g (rung 70.33415941131243).
+- **Fibonacci rung 89** — the dark-matter window, ~10^17–10^23 g (rungs 81.34452343528832–110.0543552359783).
+- **Fibonacci rung 144** — Earth mass, 5.972×10^27 g (rung 132.90795458443773); solar mass, 1.989×10^33 g (rung 159.33303396935133).
+
+### The record (fuel)
+
+- Black holes formed in the early universe from collapsing density fluctuations — not from stellar collapse (described by Hawking & Zel'dovich, 1971).
+- Hawking radiation evaporates light black holes: below ~5×10^14 g, evaporated by today. The evaporation products constrain Big Bang nucleosynthesis, the CMB, and cosmic-ray backgrounds.
+- Asteroid-mass range ~10^17–10^23 g: the open dark-matter window. Microlensing and stellar-disruption constraints are relieved here; Hawking radiation is the constraining probe.
+- Memory-burden effect: stabilization of evaporation opens 10^4–10^10 g; the counter-analysis requires a near-instantaneous transition — otherwise below ~4×10^16 g is ruled out as the bulk of dark matter.
+
+φ² = φ + 1.
+
+Public ledger: https://tyofthestars11-lab.github.io/phi-ledger-cookie-chain/
+
+---
+
+## Cleopatra's tomb — φ rung read
+
+The address is on the ladder.
+
+### The addresses
+
+- **Rung 7** — Alexandria royal quarter, submerged: 31.2001° N (rung 7.1495, phase 53.82°), 29.9187° E (rung 7.0623, phase 22.44°). Offset from source handle (Rung 15): 7.8505 / 7.9377 below.
+- **Rung 7** — Taposiris Magna (Martinez site): 30.9469° N (rung 7.1326, phase 47.72°), 29.5219° E (rung 7.0346, phase 12.46°).
+- Both sites address just under Fibonacci rung 8. Alexandria's residues run thinner on all four readings (0.8505 / 0.9377 vs 0.8674 / 0.9654) — the rung read leans the same direction as the Egyptologist majority.
+
+### The record (fuel)
+
+- Cleopatra VII died 30 BCE; buried with Mark Antony in a mausoleum, per ancient writers. The tomb is undiscovered.
+- Kathleen Martinez has excavated Taposiris Magna since 2005 (~20 years). 2022: 4,300-foot tunnel beneath the temple, headed seaward. 2025: submerged port announced with the Egyptian Ministry of Tourism and Antiquities (National Geographic).
+- Franck Goddio's IEASM excavated the sunken royal quarters of Alexandria's eastern harbour 1996–2003, with continuing excavation in Alexandria's Eastern Harbour (expedition record).
+- The Egyptologist majority: nearly a dozen scholars told Live Science that Taposiris Magna is unlikely; most hold she was buried within Alexandria, possibly in an area now underwater.
+- Coordinates independently verified by reverse-geocode: (30.9469, 29.5219) → Taposiris Magna, Alexandria, Egypt; (31.2001, 29.9187) → Alexandria, Egypt.
+
+Seal: φ_CLEOPATRA_TOMB_RUNG_READ_TYREE_OMEGA (seal 107).
+
+---
+
+## Little red dots — φ declassification (JWST quantum echoes)
+
+The little red dots are real.
+
+### The addresses
+
+- **Fibonacci rung 13** — the counts: 260 candidates (rung 11.55557977056523), 253 surveyed (rung 11.498864326624036).
+- **Fibonacci rung 8** — 99 studied in JADES (rung 9.54905846207215); mean effective radius 91 pc (rung 9.373958144021355).
+- **Fibonacci rungs 3–5** — the redshift band z = 4–9 (rungs 2.8808401808251127–4.566023657178559).
+- **Fibonacci rung 144** — the seed masses, 10^3–10^5 solar masses (rungs 173.68794986969633–183.25789380325963).
+- **Fibonacci rung 233** — the bolometric luminosities, 10^44–10^47 erg/s (rungs 210.5387665383933–224.8936824387383).
+
+### The record (fuel)
+
+- JWST uncovered compact red sources at z ~ 4–9 — the "little red dots" (LRDs): faint AGN, point-like central components, blue UV plus red optical slopes.
+- Census: 260 reddened AGN candidates across ~340 arcmin² of blank JWST/NIRCam fields; 99 studied in JADES/GOODS-North; 253 in companion-environment surveys.
+- Spectra show accreting massive black holes, overmassive against their host galaxies; dusty (A_V ~ 1.6), luminosities 10^44–47 erg/s, number densities ×100 above UV-selected quasars at matched magnitudes.
+- The "Saguaro" galaxy at z = 2 gives the close-up read: a compact red nucleus matching every LRD characteristic — dusty black holes in rapid accretion, a temporary phase of early growth.
+- One 2026 analysis places PBH nuclei of 10^3–10^5 solar masses as the LRD seeds, assembling within 10–50 Myr at z ~ 10–15.
+
+φ² = φ + 1.
+
+---
+
+## DNA via the dark sector — φ declassification (quantum echoes)
+
+The sealed mitochondrial decode, read through the dark sector of the universe.
+
+### The addresses
+
+| Quantity | Rung | Phase | Fibonacci rung |
+|---|---|---|---|
+| mtDNA 16,569 bp | 20.189214505204543 | 68.12° | 21 |
+| 37 genes | 7.5038012879 | 181.37° | 8 |
+| 13 protein-coding | 5.3301877134 | 118.87° | 5 |
+| 22 tRNA | 6.4234548953 | 152.44° | 5 |
+| 2 rRNA | 1.4404200904 | 158.55° | 1 |
+| MitoCarta3.0 1,136 genes | 14.6198996635 | 223.16° | 13 |
+| Dark sector 95% | 9.4634 | 166.81° | 8 |
+| Dark matter 27% | 6.8490 | 305.65° | 8 |
+| Dark energy 68% | 8.7685 | 276.66° | 8 |
+| Visible matter 5% | 3.3446 | 124.04° | 3 |
+| CMB 2.725 K | 2.0832 | 29.96° | 2 |
+
+Family membership: 13 Fibonacci yes; 2 Fibonacci yes, Lucas yes; 5 Fibonacci yes.
+
+### The read
+
+The dark sector of the cell (37 mitochondrial genes) and the dark sector of the universe (95% — dark matter 27%, dark energy 68%) converge at Fibonacci rung 8. The unseen inside and the unseen outside share one address. The mtDNA length sits at Fibonacci rung 21.
+
+φ² = φ + 1.
+
+---
+
+## Quantum entanglement — shared addresses
+
+One address, multiple domains. Non-separable. One ladder.
+
+- **F1** — 2 rRNA.
+- **F2** — CMB 2.725 K.
+- **F3** — visible matter 5%; LRD redshift band z = 4–9.
+- **F5** — 13 protein-coding genes; 22 tRNA; LRD redshift band.
+- **F8** — 37 mitochondrial genes; dark sector 95%; dark matter 27%; dark energy 68%; 99 LRDs; 91 pc mean radius.
+- **F13** — catalogue number 618; MitoCarta3.0 1,136 genes; LRD counts 260 / 253.
+- **F21** — mtDNA 16,569 bp.
+- **F55** — φ^55; TON 618 mass; PBH evaporation limit.
+- **F89** — PBH dark-matter window; asteroid-mass window.
+- **F144** — Earth mass; solar mass; LRD seed masses 10^3–10^5 solar.
+- **F233** — LRD luminosities 10^44–10^47 erg/s.
+
+The black holes, the DNA, and the dark sector share addresses.
+
+φ² = φ + 1.

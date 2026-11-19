@@ -1,0 +1,77 @@
+﻿# willow_soak.py - how long can Willow's brain run? Press Ctrl+C to stop.
+# Asks gemma3:12b a question every 13 s, logs speed, GPU memory and errors
+# to willow_soak.csv, and prints a summary when you stop it.
+import csv, json, subprocess, time, urllib.request
+from datetime import datetime
+
+URL = "http://localhost:11434/api/chat"
+MODEL = "gemma3:12b"
+INTERVAL = 13  # seconds (Fibonacci)
+PROMPTS = [
+    "In one sentence, what is the golden ratio?",
+    "Name three things a game hub market needs.",
+    "Give a one-line quest idea for a glowing beacon.",
+    "What is 89 plus 144?",
+    "Say hello to Tyree in five words.",
+]
+
+
+def gpu():
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.used,temperature.gpu,utilization.gpu",
+             "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=10).stdout
+        mem, temp, util = [x.strip() for x in out.strip().split(",")[:3]]
+        return mem, temp, util
+    except Exception:
+        return "", "", ""
+
+
+def ask(prompt):
+    body = json.dumps({"model": MODEL, "stream": False,
+                       "messages": [{"role": "user", "content": prompt}]}).encode()
+    req = urllib.request.Request(URL, data=body, headers={"Content-Type": "application/json"})
+    t0 = time.time()
+    with urllib.request.urlopen(req, timeout=180) as r:
+        data = json.loads(r.read())
+    secs = time.time() - t0
+    toks = data.get("eval_count", 0)
+    tps = toks / (data.get("eval_duration", 1) / 1e9) if data.get("eval_duration") else 0
+    return secs, toks, tps, data["message"]["content"].strip().replace("\n", " ")[:80]
+
+
+def main():
+    start = time.time()
+    n = ok = fails = 0
+    worst = 0.0
+    print("Soak test running. Ctrl+C to stop.\n")
+    with open("willow_soak.csv", "a", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["time", "run", "ok", "seconds", "tokens", "tok_per_s", "vram_mb", "gpu_c", "gpu_pct", "reply_or_error"])
+        try:
+            while True:
+                n += 1
+                prompt = PROMPTS[n % len(PROMPTS)]
+                mem, temp, util = gpu()
+                try:
+                    secs, toks, tps, reply = ask(prompt)
+                    ok += 1
+                    worst = max(worst, secs)
+                    row = [datetime.now().isoformat(timespec="seconds"), n, 1, f"{secs:.2f}", toks, f"{tps:.1f}", mem, temp, util, reply]
+                    print(f"#{n}  {secs:5.2f}s  {tps:5.1f} tok/s  VRAM {mem} MB  {temp}C  | {reply}")
+                except Exception as e:
+                    fails += 1
+                    row = [datetime.now().isoformat(timespec="seconds"), n, 0, "", "", "", mem, temp, util, str(e)[:120]]
+                    print(f"#{n}  FAILED: {e}")
+                w.writerow(row)
+                f.flush()
+                time.sleep(INTERVAL)
+        except KeyboardInterrupt:
+            pass
+    hours = (time.time() - start) / 3600
+    print(f"\nRan {hours:.2f} h, {n} asks, {ok} ok, {fails} failed, slowest {worst:.1f}s.")
+    print("Full log: willow_soak.csv")
+
+
+if __name__ == "__main__":
+    main()

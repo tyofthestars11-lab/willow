@@ -1,0 +1,265 @@
+# willow_center.py - Willow Command Center. A dashboard in your browser at http://127.0.0.1:1618
+# Chat, live vitals (model, VRAM, GPU), an action queue with Approve/Deny buttons, her log, her files.
+# Local only: it listens on 127.0.0.1, so nothing outside this PC can reach it.
+import json, os, re, subprocess, threading, time, urllib.request, uuid, webbrowser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import willow_web as ww
+import willow_launch as wl
+
+w = ww.w
+w.LLM_MODEL = "llama3.1:8b"  # bigger brain
+import willow_eyes as we
+w.VOICE_ON = False  # the dashboard shows her words; toggle voice with the button
+PORT = 1618
+HISTORY, FEED, PENDING = [], [], {}
+LOCK = threading.Lock()
+w.speak_orig = w.speak
+import willow_telemetry
+willow_telemetry.install(ww, w)
+
+
+def say(text, who="Willow"):
+    with LOCK:
+        FEED.append({"t": time.strftime("%H:%M:%S"), "who": who, "text": str(text)})
+        del FEED[:-89]
+    if w.VOICE_ON and text:
+        threading.Thread(target=w.speak_orig, args=(text,), daemon=True).start()
+
+
+def run_ps(command):
+    w.log(f"RUN      {command}")
+    done = subprocess.run(["powershell", "-NoProfile", "-Command", command],
+                          capture_output=True, text=True, timeout=60)
+    out = ((done.stdout or "") + (done.stderr or "")).strip()[:1500]
+    w.log("RESULT   " + ("ok" if done.returncode == 0 else "error"))
+    return ("Done." if done.returncode == 0 else "That didn't work.") + (f"\n{out}" if out else "")
+
+
+def handle_command(command):
+    # Split "a; b" into steps. BLOCKED never runs. With DLAM on, every SAFE step runs on its own.
+    steps = [s.strip() for s in command.split(";") if s.strip()]
+    for s in steps:
+        if w.BLOCKED.search(s):
+            w.log(f"BLOCKED  {s}")
+            say(f"I won't run '{s}'. It could change or delete files.", "Guard")
+            return
+    for s in steps:
+        if w.dlam_on() and w.SAFE.match(s):
+            say(f"[DLAM auto] {s}\n" + run_ps(s), "Action")
+        else:
+            pid = uuid.uuid4().hex[:8]
+            with LOCK:
+                PENDING[pid] = s
+            say(f"Waiting for your approval: {s}", "Action")
+
+
+APPS = {
+    "steam": "Start-Process 'steam://open/main'", "notepad": "Start-Process notepad",
+    "calculator": "Start-Process calc", "calc": "Start-Process calc",
+    "task manager": "Start-Process taskmgr", "file explorer": "Start-Process explorer",
+    "explorer": "Start-Process explorer", "paint": "Start-Process mspaint",
+    "edge": "Start-Process msedge", "chrome": "Start-Process chrome", "firefox": "Start-Process firefox",
+    "spotify": "Start-Process 'spotify:'", "vs code": "Start-Process code", "terminal": "Start-Process wt",
+    "settings": "Start-Process 'ms-settings:'", "snipping tool": "Start-Process snippingtool",
+}
+
+
+def respond(text):
+    low = text.lower().strip()
+    say(text, "Tyree")
+    if "autonomous" in low or "phase lock" in low:
+        w.DLAM_FILE.write_text("on", encoding="utf-8")
+        return say("Phi phase lock on. DLAM is running: safe actions go by themselves, writing and math need nothing from you, and only risky steps wait for one click.")
+    if w.dlam_toggle(text):
+        say("DLAM on. Safe actions run by themselves." if w.dlam_on() else "DLAM off. I'll ask first.")
+        return
+    if re.match(r"^(please\s+)?(open|launch|start|run)\b", low):
+        app = re.sub(r"^(please\s+)?(open|launch|start|run)\s+(up\s+)?(the\s+)?|[.!?\s]+$", "", low)
+        if app in APPS:
+            if w.dlam_on():
+                return say(f"Opening {app}.\n" + run_ps(APPS[app]), "Action")
+            return handle_command(APPS[app])
+    seen = we.handle(text, say, wl.handle)
+    if seen:
+        return say(seen)
+    launched = wl.handle(text)
+    if launched:
+        return say(launched, "Action")
+    try:
+        if low.startswith("/calc "):
+            return say(f"{text[6:]} = {ww.calc(text[6:])}")
+        qm = ww.quick_math(low)
+        if qm:
+            return say(f"{qm} = {ww.calc(qm)}")
+        if ww.WRITE_WORDS.search(low) and ww.WRITE_THINGS.search(low):
+            say("Writing it now...", "Action")
+            return say(ww.write_doc(text, text))
+        if low.startswith("/web "):
+            return say(ww.answer_from_web(text[5:], text[5:]))
+        t0 = time.time()
+        reply = ww.ask(ww.SEARCH_PROMPT, HISTORY[-16:] + [{"role": "user", "content": text}])
+        HISTORY.extend([{"role": "user", "content": text}, {"role": "assistant", "content": json.dumps(reply)}])
+        query = str(reply.get("search", "")).strip()
+        if query:
+            return say(ww.answer_from_web(text, query))
+        topic = str(reply.get("write", "")).strip()
+        if topic:
+            say("Writing it now...", "Action")
+            return say(ww.write_doc(text, topic))
+        line, expr = str(reply.get("say", "")), str(reply.get("calc", "")).strip()
+        if expr:
+            line = f"{line} {expr} = {ww.calc(expr)}".strip()
+        say(f"{line}  ({time.time() - t0:.1f}s)")
+        command = str(reply.get("command", "")).strip()
+        if command:
+            handle_command(command)
+    except Exception as e:
+        say(f"Something went wrong: {e}", "Guard")
+
+
+def vitals():
+    v = {"dlam": w.dlam_on(), "voice": w.VOICE_ON, "model": w.LLM_MODEL, "loaded": [], "gpu": None}
+    try:
+        ps = json.loads(urllib.request.urlopen("http://localhost:11434/api/ps", timeout=3).read())
+        v["loaded"] = [{"name": m.get("name"), "vram_mb": round(m.get("size_vram", 0) / 1048576)} for m in ps.get("models", [])]
+    except Exception:
+        v["loaded"] = None
+    try:
+        q = subprocess.run(["nvidia-smi", "--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu",
+                            "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=5).stdout.strip()
+        n, u, mu, mt, tc = [x.strip() for x in q.splitlines()[0].split(",")]
+        v["gpu"] = {"name": n, "util": int(u), "mem_used": int(mu), "mem_total": int(mt), "temp": int(tc)}
+    except Exception:
+        pass
+    try:
+        v["log"] = w.LOG_FILE.read_text(encoding="utf-8").splitlines()[-21:]
+    except Exception:
+        v["log"] = []
+    try:
+        files = sorted(os.scandir(ww.WRITE_DIR), key=lambda e: e.stat().st_mtime, reverse=True)[:8]
+        v["files"] = [f.name for f in files]
+    except Exception:
+        v["files"] = []
+    with LOCK:
+        v["pending"] = [{"id": k, "cmd": c} for k, c in PENDING.items()]
+        v["feed"] = list(FEED)
+    return v
+
+
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def send(self, code, body, ctype="application/json"):
+        data = body.encode("utf-8") if isinstance(body, str) else body
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):
+        if self.path == "/":
+            return self.send(200, PAGE, "text/html; charset=utf-8")
+        if self.path == "/api/vitals":
+            return self.send(200, json.dumps(vitals()))
+        self.send(404, "{}")
+
+    def do_POST(self):
+        if self.headers.get("Origin") not in (None, f"http://127.0.0.1:{PORT}", f"http://localhost:{PORT}"):
+            return self.send(403, "{}")  # only this dashboard may drive her
+        n = int(self.headers.get("Content-Length", 0) or 0)
+        data = json.loads(self.rfile.read(n) or b"{}")
+        if self.path == "/api/chat":
+            threading.Thread(target=respond, args=(str(data.get("text", ""))[:2000],), daemon=True).start()
+        elif self.path in ("/api/approve", "/api/deny"):
+            with LOCK:
+                cmd = PENDING.pop(str(data.get("id")), None)
+            if cmd and self.path == "/api/approve":
+                threading.Thread(target=lambda: say(f"[approved] {cmd}\n" + run_ps(cmd), "Action"), daemon=True).start()
+            elif cmd:
+                w.log(f"DECLINED {cmd}")
+                say(f"Skipped: {cmd}", "Action")
+        elif self.path == "/api/dlam":
+            respond("dlam" if data.get("on") else "dlam off")
+        elif self.path == "/api/voice":
+            w.VOICE_ON = not w.VOICE_ON
+        self.send(200, "{}")
+
+
+PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><title>WILLOW // Command Center</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{--bg:#060914;--panel:#0b1226cc;--line:#1d2b55;--gold:#d8b25a;--gold2:#f3d98b;--cyan:#5ee7ff;--red:#ff5d6c;--grn:#41e39a;--txt:#dfe6ff;--dim:#7b88b3}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(1200px 700px at 61.8% 38.2%,#14204a 0,#060914 62%);color:var(--txt);font:14px/1.5 Consolas,ui-monospace,monospace;min-height:100vh;overflow:auto}
+canvas#bg{position:fixed;inset:0;z-index:0;opacity:.55}
+.grid{position:relative;z-index:1;display:grid;min-height:100vh;padding:13px;gap:13px;grid-template-columns:38.2fr 61.8fr;grid-template-rows:auto 1fr}
+header{grid-column:1/3;display:flex;align-items:center;gap:21px;padding:8px 21px;border:1px solid var(--line);background:var(--panel);border-radius:8px;backdrop-filter:blur(8px)}
+h1{margin:0;font-size:21px;letter-spacing:.38em;color:var(--gold2);text-shadow:0 0 13px #d8b25a88}
+.pill{padding:3px 13px;border:1px solid var(--line);border-radius:99px;color:var(--dim);cursor:pointer;user-select:none}
+.pill.on{color:#04110a;background:var(--grn);border-color:var(--grn);box-shadow:0 0 13px #41e39a99}
+.col{display:flex;flex-direction:column;gap:13px;min-height:0}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:13px;backdrop-filter:blur(8px);min-height:0}
+.card h2{margin:0 0 8px;font-size:11px;letter-spacing:.3em;color:var(--gold)}
+#core{display:flex;align-items:center;gap:21px}
+#orb{width:144px;height:144px;flex:none}
+.stat{display:flex;justify-content:space-between;border-bottom:1px dashed #1d2b5588;padding:2px 0}.stat b{color:var(--cyan);font-weight:normal}
+.bar{height:5px;background:#1d2b55;border-radius:3px;overflow:hidden;margin:2px 0 8px}.bar i{display:block;height:100%;background:linear-gradient(90deg,var(--cyan),var(--gold))}
+#feed{flex:1;overflow:auto;display:flex;flex-direction:column;gap:8px;padding-right:5px}
+.m{padding:8px 13px;border-radius:8px;border:1px solid var(--line);white-space:pre-wrap;max-width:89%}
+.m small{display:block;color:var(--dim);font-size:10px;letter-spacing:.2em}
+.Tyree{align-self:flex-end;background:#16224a}.Willow{border-color:#d8b25a66;background:#1a1730}.Action{border-color:#5ee7ff66;background:#0b2230}.Guard{border-color:var(--red);background:#2a0c14}
+form{display:flex;gap:8px;margin-top:8px}input{flex:1;background:#050a1a;border:1px solid var(--line);color:var(--txt);padding:13px;border-radius:8px;font:inherit;outline:none}input:focus{border-color:var(--gold)}
+button{background:var(--gold);color:#120c00;border:0;border-radius:8px;padding:8px 13px;font:inherit;font-weight:bold;cursor:pointer}button.no{background:#2a0c14;color:var(--red);border:1px solid var(--red)}
+.q{display:flex;gap:8px;align-items:center;margin-bottom:5px}.q code{flex:1;color:var(--gold2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#log{font-size:11px;color:var(--dim);overflow:auto;max-height:180px;white-space:pre}
+.quick{display:flex;flex-wrap:wrap;gap:5px}.quick button{background:#0f1a3a;color:var(--gold2);border:1px solid var(--line);font-weight:normal}
+header{order:-2;grid-column:1/-1!important}.grid{grid-template-columns:1fr!important;grid-template-rows:auto!important}.grid>.card:last-child{order:-1;height:61.8vh}</style></head><body><canvas id="bg"></canvas>
+<div class="grid">
+<header><h1>W I L L O W</h1><span class="pill" id="dlam">DLAM</span><span class="pill" id="voice">VOICE</span><span id="clock" style="margin-left:auto;color:var(--dim)"></span></header>
+<div class="col">
+ <div class="card" id="core"><svg id="orb" viewBox="-100 -100 200 200"></svg><div style="flex:1" id="vit"></div></div>
+ <div class="card"><h2>ACTION QUEUE</h2><div id="queue"><span style="color:var(--dim)">Nothing waiting.</span></div></div>
+ <div class="card"><h2>QUICK</h2><div class="quick">
+  <button data-q="what is the weather in Denver today?">Weather</button><button data-q="what rung is the speed of light?">Rung of c</button>
+  <button data-q="write a short note listing today's VEIL OMNI to-dos">Write note</button><button data-q="open steam">Steam</button>
+  <button data-q="/calc powers(1,13)">phi 1..13</button><button data-q="open task manager">Task Mgr</button></div></div>
+ <div class="card" style="flex:1;display:flex;flex-direction:column"><h2>FILES SHE WROTE</h2><div id="files" style="color:var(--gold2)"></div><h2 style="margin-top:13px">LOG</h2><div id="log"></div></div>
+</div>
+<div class="card" style="display:flex;flex-direction:column"><h2>CHANNEL</h2><div id="feed"></div>
+<form id="f"><input id="t" placeholder="Talk to Willow... (/calc, /web, DLAM, write an essay about...)" autocomplete="off" autofocus><button>SEND</button></form></div>
+</div>
+<script>
+const PHI=(1+Math.sqrt(5))/2,GA=137.5077640500378*Math.PI/180,$=s=>document.querySelector(s);
+const post=(p,b)=>fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});
+// background: Vogel phyllotaxis field, 377 points, slowly turning
+const cv=$('#bg'),cx=cv.getContext('2d');let rot=0;function bg(){cv.width=innerWidth;cv.height=innerHeight;const X=cv.width*.618,Y=cv.height*.382,S=Math.min(cv.width,cv.height)/40;cx.clearRect(0,0,cv.width,cv.height);
+for(let n=1;n<377;n++){const a=n*GA+rot,r=S*Math.sqrt(n);cx.fillStyle=n%13?'#5ee7ff22':'#d8b25a66';cx.beginPath();cx.arc(X+r*Math.cos(a),Y+r*Math.sin(a),1+n/233,0,7);cx.fill()}rot+=.0013;requestAnimationFrame(bg)}bg();
+// orb: golden-angle rings that spin faster with GPU load
+let load=0,spin=0;function orb(){let s='';for(let n=1;n<89;n++){const a=n*GA+spin,r=8*Math.sqrt(n);s+=`<circle cx="${(r*Math.cos(a)).toFixed(1)}" cy="${(r*Math.sin(a)).toFixed(1)}" r="${(1+n/34).toFixed(1)}" fill="${n%8?'#5ee7ff':'#f3d98b'}" opacity="${(.3+.7*n/89).toFixed(2)}"/>`}
+$('#orb').innerHTML=s;spin+=.004+load/2500;requestAnimationFrame(orb)}orb();
+function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+let seen=0;async function tick(){try{const v=await (await fetch('/api/vitals')).json();
+$('#dlam').classList.toggle('on',v.dlam);$('#voice').classList.toggle('on',v.voice);
+const g=v.gpu;load=g?g.util:0;let h=`<div class="stat">MODEL<b>${esc(v.model)}</b></div><div class="stat">BRAIN<b>${v.loaded===null?'Ollama offline':v.loaded.length?v.loaded.map(m=>esc(m.name)+' '+m.vram_mb+' MB').join(', '):'asleep'}</b></div>`;
+if(g)h+=`<div class="stat">GPU<b>${esc(g.name)} ${g.temp}&deg;C</b></div><div class="stat">LOAD<b>${g.util}%</b></div><div class="bar"><i style="width:${g.util}%"></i></div><div class="stat">VRAM<b>${g.mem_used} / ${g.mem_total} MiB</b></div><div class="bar"><i style="width:${100*g.mem_used/g.mem_total}%"></i></div>`;
+$('#vit').innerHTML=h;
+$('#queue').innerHTML=v.pending.length?v.pending.map(p=>`<div class="q"><code title="${esc(p.cmd)}">${esc(p.cmd)}</code><button onclick="post('/api/approve',{id:'${p.id}'})">RUN</button><button class="no" onclick="post('/api/deny',{id:'${p.id}'})">NO</button></div>`).join(''):'<span style="color:var(--dim)">Nothing waiting.</span>';
+$('#files').innerHTML=v.files.length?v.files.map(esc).join('<br>'):'<span style="color:var(--dim)">None yet.</span>';
+$('#log').textContent=v.log.join('\n');$('#log').scrollTop=1e9;
+if(v.feed.length!==seen){seen=v.feed.length;$('#feed').innerHTML=v.feed.map(m=>`<div class="m ${m.who}"><small>${m.who.toUpperCase()} &middot; ${m.t}</small>${esc(m.text)}</div>`).join('');$('#feed').scrollTop=1e9}
+}catch(e){$('#vit').innerHTML='<span style="color:var(--red)">Command Center lost contact. Is willow_center.py still running?</span>'}}
+setInterval(tick,987);tick();setInterval(()=>$('#clock').textContent=new Date().toLocaleTimeString(),1000);
+$('#f').onsubmit=e=>{e.preventDefault();const t=$('#t').value.trim();if(t){post('/api/chat',{text:t});$('#t').value=''}};
+document.querySelectorAll('.quick button').forEach(b=>b.onclick=()=>post('/api/chat',{text:b.dataset.q}));
+$('#dlam').onclick=()=>post('/api/dlam',{on:!$('#dlam').classList.contains('on')});$('#voice').onclick=()=>post('/api/voice');
+</script></body></html>"""
+
+if __name__ == "__main__":
+    srv = ThreadingHTTPServer(("127.0.0.1", PORT), H)
+    import willow_ears
+    willow_ears.start(respond, say, w)
+    say("Command Center online. I'm here, Tyree.")
+    print(f"Willow Command Center: http://127.0.0.1:{PORT}  (close this window to stop her)")
+    threading.Timer(1.0, lambda: webbrowser.open(f"http://127.0.0.1:{PORT}")).start()
+    srv.serve_forever()

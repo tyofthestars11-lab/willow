@@ -1,0 +1,603 @@
+=== CarryWeightSystem.cpp ===
+// CarryWeightSystem.cpp - Implementation of Unlimited Carry Weight System
+#include "CarryWeightSystem.h"
+
+UCarryWeightSystem::UCarryWeightSystem()
+{
+    PrimaryComponentTick.bCanEverTick = false;
+    bUnlimitedCarryWeight = true;
+}
+
+void UCarryWeightSystem::BeginPlay()
+{
+    Super::BeginPlay();
+}
+
+bool UCarryWeightSystem::AddItem(const FInventoryItem& NewItem)
+{
+    // Unlimited carry weight - always allow adding items
+    for (FInventoryItem& Item : Items)
+    {
+        if (Item.Name == NewItem.Name && Item.Rarity == NewItem.Rarity)
+        {
+            Item.Quantity += NewItem.Quantity;
+            return true;
+        }
+    }
+    Items.Add(NewItem);
+    return true;
+}
+
+bool UCarryWeightSystem::RemoveItem(const FString& ItemName, int32 Quantity)
+{
+    for (int32 i = Items.Num() - 1; i >= 0; i--)
+    {
+        if (Items[i].Name == ItemName)
+        {
+            Items[i].Quantity -= Quantity;
+            if (Items[i].Quantity <= 0)
+            {
+                Items.RemoveAt(i);
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+float UCarryWeightSystem::GetCurrentWeight() const
+{
+    float TotalWeight = 0.0f;
+    for (const FInventoryItem& Item : Items)
+    {
+        TotalWeight += Item.Weight * Item.Quantity;
+    }
+    return TotalWeight;
+}
+
+TArray<FInventoryItem> UCarryWeightSystem::GetItems() const
+{
+    return Items;
+}
+
+bool UCarryWeightSystem::HasItem(const FString& ItemName) const
+{
+    for (const FInventoryItem& Item : Items)
+    {
+        if (Item.Name == ItemName)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+int32 UCarryWeightSystem::GetItemCount() const
+{
+    return Items.Num();
+}
+
+
+=== CarryWeightSystem.h ===
+// CarryWeightSystem.h - Unlimited Carry Weight System
+#pragma once
+
+#include "CoreMinimal.h"
+#include "Components/ActorComponent.h"
+#include "CarryWeightSystem.generated.h"
+
+UENUM(BlueprintType)
+enum class EItemRarity : uint8
+{
+    Common UMETA(DisplayName = "Common"),
+    Uncommon UMETA(DisplayName = "Uncommon"),
+    Rare UMETA(DisplayName = "Rare"),
+    Epic UMETA(DisplayName = "Epic"),
+    Legendary UMETA(DisplayName = "Legendary")
+};
+
+USTRUCT(BlueprintType)
+struct FInventoryItem
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Inventory")
+    FString Name;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Inventory")
+    float Weight;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Inventory")
+    int32 Quantity;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Inventory")
+    EItemRarity Rarity;
+
+    FInventoryItem()
+        : Name(TEXT("")), Weight(0.0f), Quantity(1), Rarity(EItemRarity::Common)
+    {}
+
+    FInventoryItem(const FString& InName, float InWeight, int32 InQuantity, EItemRarity InRarity)
+        : Name(InName), Weight(InWeight), Quantity(InQuantity), Rarity(InRarity)
+    {}
+};
+
+UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
+class PHIWORLDRPGRPG_API UCarryWeightSystem : public UActorComponent
+{
+    GENERATED_BODY()
+
+public:
+    UCarryWeightSystem();
+
+protected:
+    virtual void BeginPlay() override;
+
+public:
+    // Unlimited carry weight - no limit on items
+    UFUNCTION(BlueprintCallable, Category = "Inventory")
+    bool AddItem(const FInventoryItem& NewItem);
+
+    UFUNCTION(BlueprintCallable, Category = "Inventory")
+    bool RemoveItem(const FString& ItemName, int32 Quantity = 1);
+
+    UFUNCTION(BlueprintPure, Category = "Inventory")
+    float GetCurrentWeight() const;
+
+    UFUNCTION(BlueprintPure, Category = "Inventory")
+    TArray<FInventoryItem> GetItems() const;
+
+    UFUNCTION(BlueprintPure, Category = "Inventory")
+    bool HasItem(const FString& ItemName) const;
+
+    UFUNCTION(BlueprintPure, Category = "Inventory")
+    int32 GetItemCount() const;
+
+private:
+    UPROPERTY(VisibleAnywhere, Category = "Inventory")
+    TArray<FInventoryItem> Items;
+
+    // Unlimited weight capacity - always returns true for weight checks
+    UPROPERTY(VisibleAnywhere, Category = "Inventory")
+    bool bUnlimitedCarryWeight;
+};
+
+
+=== GodModeAssetManager.cpp ===
+// GodModeAssetManager.cpp - Implementation of Asset and Texture Management
+#include "GodModeAssetManager.h"
+#include "Materials/MaterialInstanceDynamic.h"
+#include "Engine/Texture2D.h"
+#include "UObject/ConstructorHelpers.h"
+
+UGodModeAssetManager::UGodModeAssetManager()
+{
+    PrimaryComponentTick.bCanEverTick = false;
+    CurrentGlowMaterial = nullptr;
+    CurrentAuraMaterial = nullptr;
+    LoadedTexture = nullptr;
+    DefaultGlowColor = FLinearColor(0.0f, 1.0f, 0.5f, 1.0f);
+    DefaultGlowIntensity = 5.0f;
+    DefaultAuraColor = FLinearColor(0.5f, 0.0f, 1.0f, 1.0f);
+    DefaultAuraOpacity = 0.7f;
+    DefaultPulseSpeed = 2.0f;
+}
+
+void UGodModeAssetManager::BeginPlay()
+{
+    Super::BeginPlay();
+    SetupDefaultMaterials();
+}
+
+UMaterialInstanceDynamic* UGodModeAssetManager::CreateGlowMaterial(UMaterialInterface* BaseMaterial, FLinearColor GlowColor, float GlowIntensity)
+{
+    if (!BaseMaterial)
+    {
+        return nullptr;
+    }
+
+    UMaterialInstanceDynamic* DynMaterial = UMaterialInstanceDynamic::Create(BaseMaterial, this);
+    if (DynMaterial)
+    {
+        DynMaterial->SetVectorParameterValue(FName("GlowColor"), GlowColor);
+        DynMaterial->SetScalarParameterValue(FName("GlowIntensity"), GlowIntensity);
+        CurrentGlowMaterial = DynMaterial;
+    }
+    return DynMaterial;
+}
+
+UMaterialInstanceDynamic* UGodModeAssetManager::CreateAuraMaterial(UMaterialInterface* BaseMaterial, FLinearColor AuraColor, float Opacity, float PulseSpeed)
+{
+    if (!BaseMaterial)
+    {
+        return nullptr;
+    }
+
+    UMaterialInstanceDynamic* DynMaterial = UMaterialInstanceDynamic::Create(BaseMaterial, this);
+    if (DynMaterial)
+    {
+        DynMaterial->SetVectorParameterValue(FName("AuraColor"), AuraColor);
+        DynMaterial->SetScalarParameterValue(FName("Opacity"), Opacity);
+        DynMaterial->SetScalarParameterValue(FName("PulseSpeed"), PulseSpeed);
+        CurrentAuraMaterial = DynMaterial;
+    }
+    return DynMaterial;
+}
+
+UTexture2D* UGodModeAssetManager::LoadTexture(const FString& TexturePath)
+{
+    UTexture2D* Texture = Cast<UTexture2D>(StaticLoadObject(UTexture2D::StaticClass(), nullptr, *TexturePath));
+    if (Texture)
+    {
+        LoadedTexture = Texture;
+    }
+    return Texture;
+}
+
+void UGodModeAssetManager::SetupDefaultMaterials()
+{
+    // Default materials will be set up when a valid base material is provided
+    CurrentGlowMaterial = nullptr;
+    CurrentAuraMaterial = nullptr;
+}
+
+UMaterialInstanceDynamic* UGodModeAssetManager::GetGlowMaterial() const
+{
+    return CurrentGlowMaterial;
+}
+
+UMaterialInstanceDynamic* UGodModeAssetManager::GetAuraMaterial() const
+{
+    return CurrentAuraMaterial;
+}
+
+
+=== GodModeAssetManager.h ===
+// GodModeAssetManager.h - Asset and Texture Management
+#pragma once
+
+#include "CoreMinimal.h"
+#include "Components/ActorComponent.h"
+#include "Materials/MaterialInstanceDynamic.h"
+#include "Engine/Texture2D.h"
+#include "GodModeAssetManager.generated.h"
+
+UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
+class PHIWORLDRPGRPG_API UGodModeAssetManager : public UActorComponent
+{
+    GENERATED_BODY()
+
+public:
+    UGodModeAssetManager();
+
+protected:
+    virtual void BeginPlay() override;
+
+public:
+    UFUNCTION(BlueprintCallable, Category = "Assets|Materials")
+    UMaterialInstanceDynamic* CreateGlowMaterial(UMaterialInterface* BaseMaterial, FLinearColor GlowColor, float GlowIntensity);
+
+    UFUNCTION(BlueprintCallable, Category = "Assets|Materials")
+    UMaterialInstanceDynamic* CreateAuraMaterial(UMaterialInterface* BaseMaterial, FLinearColor AuraColor, float Opacity, float PulseSpeed);
+
+    UFUNCTION(BlueprintCallable, Category = "Assets|Textures")
+    UTexture2D* LoadTexture(const FString& TexturePath);
+
+    UFUNCTION(BlueprintCallable, Category = "Assets|Materials")
+    void SetupDefaultMaterials();
+
+    UFUNCTION(BlueprintPure, Category = "Assets")
+    UMaterialInstanceDynamic* GetGlowMaterial() const;
+
+    UFUNCTION(BlueprintPure, Category = "Assets")
+    UMaterialInstanceDynamic* GetAuraMaterial() const;
+
+private:
+    UPROPERTY()
+    UMaterialInstanceDynamic* CurrentGlowMaterial;
+
+    UPROPERTY()
+    UMaterialInstanceDynamic* CurrentAuraMaterial;
+
+    UPROPERTY()
+    UTexture2D* LoadedTexture;
+
+    UPROPERTY(EditAnywhere, Category = "Assets|Config")
+    FLinearColor DefaultGlowColor;
+
+    UPROPERTY(EditAnywhere, Category = "Assets|Config")
+    float DefaultGlowIntensity;
+
+    UPROPERTY(EditAnywhere, Category = "Assets|Config")
+    FLinearColor DefaultAuraColor;
+
+    UPROPERTY(EditAnywhere, Category = "Assets|Config")
+    float DefaultAuraOpacity;
+
+    UPROPERTY(EditAnywhere, Category = "Assets|Config")
+    float DefaultPulseSpeed;
+};
+
+
+=== GodModeCharacter.cpp ===
+#include "GodModeCharacter.h"
+
+AGodModeCharacter::AGodModeCharacter()
+{
+    PrimaryActorTick.bCanEverTick = true;
+    bIsGodModeActive = false;
+    MaxHealth = 9999.0f;
+    CurrentHealth = 9999.0f;
+}
+
+void AGodModeCharacter::BeginPlay()
+{
+    Super::BeginPlay();
+}
+
+void AGodModeCharacter::ActivateGodMode()
+{
+    bIsGodModeActive = true;
+    CurrentHealth = MaxHealth;
+}
+
+void AGodModeCharacter::DeactivateGodMode()
+{
+    bIsGodModeActive = false;
+}
+
+
+=== GodModeCharacter.h ===
+#pragma once
+
+#include "CoreMinimal.h"
+#include "GameFramework/Character.h"
+#include "GodModeCharacter.generated.h"
+
+UCLASS()
+class PHIWORLDRPGRPG_API AGodModeCharacter : public ACharacter
+{
+    GENERATED_BODY()
+
+public:
+    AGodModeCharacter();
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GodMode")
+    bool bIsGodModeActive;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GodMode")
+    float MaxHealth;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GodMode")
+    float CurrentHealth;
+
+    UFUNCTION(BlueprintCallable, Category = "GodMode")
+    void ActivateGodMode();
+
+    UFUNCTION(BlueprintCallable, Category = "GodMode")
+    void DeactivateGodMode();
+
+protected:
+    virtual void BeginPlay() override;
+};
+
+
+=== GodModeLootSystem.cpp ===
+#include "GodModeLootSystem.h"
+
+UGodModeLootSystem::UGodModeLootSystem()
+{
+    PrimaryComponentTick.bCanEverTick = false;
+    DropRate = 1.0f;
+    MaxDrops = 99;
+    bGuaranteedDrop = true;
+}
+
+void UGodModeLootSystem::BeginPlay()
+{
+    Super::BeginPlay();
+}
+
+FString UGodModeLootSystem::GenerateLootDrop()
+{
+    if (LootTable.Num() == 0)
+    {
+        return FString(TEXT("None"));
+    }
+    if (bGuaranteedDrop)
+    {
+        int32 Index = FMath::RandRange(0, LootTable.Num() - 1);
+        return LootTable[Index];
+    }
+    float Roll = FMath::FRand();
+    if (Roll <= DropRate)
+    {
+        int32 Index = FMath::RandRange(0, LootTable.Num() - 1);
+        return LootTable[Index];
+    }
+    return FString(TEXT("None"));
+}
+
+void UGodModeLootSystem::AddToLootTable(const FString& ItemName)
+{
+    LootTable.Add(ItemName);
+}
+
+void UGodModeLootSystem::ClearLootTable()
+{
+    LootTable.Empty();
+}
+
+
+=== GodModeLootSystem.h ===
+#pragma once
+
+#include "CoreMinimal.h"
+#include "Components/ActorComponent.h"
+#include "GodModeLootSystem.generated.h"
+
+UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
+class PHIWORLDRPGRPG_API UGodModeLootSystem : public UActorComponent
+{
+    GENERATED_BODY()
+
+public:
+    UGodModeLootSystem();
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Loot")
+    float DropRate;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Loot")
+    int32 MaxDrops;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Loot")
+    bool bGuaranteedDrop;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Loot")
+    TArray<FString> LootTable;
+
+    UFUNCTION(BlueprintCallable, Category = "Loot")
+    FString GenerateLootDrop();
+
+    UFUNCTION(BlueprintCallable, Category = "Loot")
+    void AddToLootTable(const FString& ItemName);
+
+    UFUNCTION(BlueprintCallable, Category = "Loot")
+    void ClearLootTable();
+
+protected:
+    virtual void BeginPlay() override;
+};
+
+
+=== PhiWorldRPGRPG.Build.cs ===
+using UnrealBuildTool;
+
+public class PhiWorldRPGRPG : ModuleRules
+{
+    public PhiWorldRPGRPG(ReadOnlyTargetRules Target) : base(Target)
+    {
+        PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
+
+        PublicDependencyModuleNames.AddRange(new string[] {
+            "Core",
+            "CoreUObject",
+            "Engine",
+            "InputCore",
+            "GameplayAbilities",
+            "GameplayTags",
+            "GameplayTasks",
+            "EnhancedInput",
+            "Niagara",
+            "UMG"
+        });
+
+        PrivateDependencyModuleNames.AddRange(new string[] {
+            "Slate",
+            "SlateCore"
+        });
+    }
+}
+
+
+=== PhiWorldRPGRPG.cpp ===
+#include "PhiWorldRPGRPG.h"
+#include "Modules/ModuleManager.h"
+
+IMPLEMENT_PRIMARY_GAME_MODULE(FDefaultGameModuleImpl, PhiWorldRPGRPG, "PhiWorldRPGRPG");
+
+DEFINE_LOG_CATEGORY(LogPhiWorldRPGRPG);
+
+
+=== PhiWorldRPGRPG.h ===
+#pragma once
+
+#include "CoreMinimal.h"
+
+DECLARE_LOG_CATEGORY_EXTERN(LogPhiWorldRPGRPG, Log, All);
+
+
+=== SimplePuzzleSystem.cpp ===
+#include "SimplePuzzleSystem.h"
+
+USimplePuzzleSystem::USimplePuzzleSystem()
+{
+    PrimaryComponentTick.bCanEverTick = false;
+    bIsSolved = false;
+    PuzzleName = TEXT("DefaultPuzzle");
+    RequiredSteps = 3;
+    CurrentStep = 0;
+}
+
+void USimplePuzzleSystem::BeginPlay()
+{
+    Super::BeginPlay();
+}
+
+void USimplePuzzleSystem::AdvanceStep()
+{
+    if (!bIsSolved)
+    {
+        CurrentStep++;
+        CheckSolved();
+    }
+}
+
+void USimplePuzzleSystem::ResetPuzzle()
+{
+    CurrentStep = 0;
+    bIsSolved = false;
+}
+
+bool USimplePuzzleSystem::CheckSolved()
+{
+    if (CurrentStep >= RequiredSteps)
+    {
+        bIsSolved = true;
+    }
+    return bIsSolved;
+}
+
+
+=== SimplePuzzleSystem.h ===
+#pragma once
+
+#include "CoreMinimal.h"
+#include "Components/ActorComponent.h"
+#include "SimplePuzzleSystem.generated.h"
+
+UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
+class PHIWORLDRPGRPG_API USimplePuzzleSystem : public UActorComponent
+{
+    GENERATED_BODY()
+
+public:
+    USimplePuzzleSystem();
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Puzzle")
+    bool bIsSolved;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Puzzle")
+    FString PuzzleName;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Puzzle")
+    int32 RequiredSteps;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Puzzle")
+    int32 CurrentStep;
+
+    UFUNCTION(BlueprintCallable, Category = "Puzzle")
+    void AdvanceStep();
+
+    UFUNCTION(BlueprintCallable, Category = "Puzzle")
+    void ResetPuzzle();
+
+    UFUNCTION(BlueprintCallable, Category = "Puzzle")
+    bool CheckSolved();
+
+protected:
+    virtual void BeginPlay() override;
+};
+
+
+
