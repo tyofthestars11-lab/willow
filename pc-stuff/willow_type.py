@@ -1,6 +1,6 @@
 ﻿# willow_type.py - type to Willow. She answers on screen and out loud.
 # DLAM on: safe commands run with no y/n. Anything else asks. Blocked never runs.
-import json, math, re, subprocess, urllib.request
+import json, math, os, re, shutil, subprocess, urllib.request
 from datetime import datetime
 from pathlib import Path
 
@@ -22,6 +22,9 @@ SYSTEM_PROMPT = (
     "\"say\" is your answer to him. "
     "\"command\" is ONE PowerShell command that does what he asked, or \"\" if no command is needed. "
     "Open apps with Start-Process (notepad, calc, explorer, a URL). "
+    "Only use program names that really exist on this PC (notepad, calc, explorer, mspaint, msedge, chrome, firefox, spotify, steam, code, wt, taskmgr, snippingtool). "
+    "Open a website with Start-Process '<url>' in your default browser - never invent a launcher program like iexec, "
+    "and never use ms-copilot as a program (open https://copilot.microsoft.com in the browser instead). "
     "Never delete, move, or overwrite files, never format disks, never shut down or restart, "
     "never edit the registry, never download or run scripts from the internet, "
     "and never touch D:\\VEIL-OMNI or any Unreal project. If asked to, refuse in \"say\" with an empty command."
@@ -56,10 +59,61 @@ BLOCKED = re.compile(
 # DLAM: safe commands run with no y/n. Only opening apps, sites, settings, and read-only Get- checks.
 SAFE = re.compile(
     r"^\s*(?:start-process\s+(?:(?P<q>['\"]?)(?:notepad|calc|explorer|mspaint|msedge|chrome|firefox|spotify|steam|"
-    r"code|wt|taskmgr|snippingtool)(?:\.exe)?(?P=q)|(?P<q2>['\"]?)(?:https?://[^\s'\";|&`]+|ms-settings:[^\s'\";|&`]*)(?P=q2))"
+    r"code|wt|taskmgr|snippingtool)(?:\.exe)?(?P=q)|(?P<q2>['\"]?)(?:https?://[^\s'\";|&`]+|ms-settings:[^\s'\";|&`]*)(?P=q2)"
+    r"|(?:msedge|chrome|firefox)\s+['\"]?https?://[^\s'\";|&`]+['\"]?)"
     r"|get-(?:date|process|computerinfo|volume|childitem|location|netipaddress|service)\b[^;|&`]*)\s*$",
     re.IGNORECASE,
 )
+
+
+# Commands the model invents must never reach PowerShell: only real programs
+# run. A URL is opened in the browser, never handed to a fake launcher.
+KNOWN_PROGRAMS = {"notepad", "calc", "explorer", "mspaint", "msedge", "chrome",
+                  "firefox", "spotify", "steam", "code", "wt", "taskmgr",
+                  "snippingtool", "powershell", "pwsh"}
+URL_RE = re.compile(r"https?://[^\s'\";|&`]+")
+URI_RE = re.compile(r"^(?:steam://|spotify:|ms-settings:)[^\s'\";|&`]*$", re.IGNORECASE)
+
+
+def sanitize_command(command):
+    """Check a model-generated command before it runs.
+    Returns (runnable_command, None), or (None, reason) if it must not run.
+    Repairs the two mistakes seen live: a made-up launcher handed a URL
+    (iexec + google.com) and ms-copilot used as if it were a program."""
+    cmd = (command or "").strip()
+    m = re.match(r"^\s*start-process\b\s*(.*)$", cmd, re.IGNORECASE)
+    if not m:
+        return cmd, None  # not a launch: BLOCKED / SAFE still decide it
+    rest = m.group(1)
+    target, args = None, rest
+    fm = re.match(r"-filepath\s+(?:\"([^\"]+)\"|'([^']+)'|(\S+))\s*(.*)$", rest, re.IGNORECASE)
+    if fm:
+        target = fm.group(1) or fm.group(2) or fm.group(3)
+        args = fm.group(4) or ""
+    else:
+        tm = re.match(r"(?:\"([^\"]+)\"|'([^']+)'|(\S+))\s*(.*)$", rest)
+        if tm:
+            target = tm.group(1) or tm.group(2) or tm.group(3)
+            args = tm.group(4) or ""
+    if not target:
+        return None, "that launch command has no program in it"
+    low = target.lower()
+    if low.endswith(".exe"):
+        low = low[:-4]
+    url = URL_RE.search(args) or URL_RE.search(target)
+    if low in ("iexec", "iexplore", "internet explorer") and url:
+        return f"Start-Process '{url.group(0)}'", "opened the link in your browser instead of iexec"
+    if low in ("ms-copilot", "copilot"):
+        return "Start-Process msedge \"https://copilot.microsoft.com\"", "opened Copilot in the browser"
+    if URL_RE.fullmatch(target) or URI_RE.match(target):
+        return f"Start-Process '{target}'", None
+    if low in KNOWN_PROGRAMS:
+        return cmd, None
+    if os.path.exists(target) or shutil.which(target):
+        return cmd, None
+    if url:
+        return f"Start-Process '{url.group(0)}'", f"'{target}' is not a program on this PC, so I opened the link instead"
+    return None, f"'{target}' is not a program on this PC, so I won't run it"
 
 
 def dlam_on():
@@ -98,13 +152,27 @@ def speak(text):
 def think(history, user_text):
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history[-16:]
     messages.append({"role": "user", "content": user_text})
-    payload = {"model": LLM_MODEL, "messages": messages, "stream": False,
+    payload = {"model": LLM_MODEL, "messages": messages, "stream": True,
                "format": "json", "options": {"temperature": 1 - 1 / PHI, "num_ctx": 8192}}
     req = urllib.request.Request(OLLAMA_URL, data=json.dumps(payload).encode("utf-8"),
                                  headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            content = json.loads(resp.read())["message"]["content"]
+        parts = []
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            for line in resp:  # stream: tokens keep arriving, no long idle read
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    chunk = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                content = chunk.get("message", {}).get("content")
+                if content:
+                    parts.append(content)
+                if chunk.get("done"):
+                    break
+        content = "".join(parts)
     except Exception as e:
         return {"say": f"I can't reach Ollama. Is it running? ({e})", "command": ""}
     try:
@@ -121,6 +189,14 @@ def run_command(command):
         log(f"BLOCKED  {command}")
         speak("I won't run that one. It could change or delete files.")
         return
+    command, why = sanitize_command(command)
+    if command is None:
+        log(f"REJECTED {why}")
+        speak(why + ".")
+        return
+    if why:
+        print(f"(fixed: {why})")
+        log(f"REPAIRED {command} ({why})")
     print(f"Command: {command}")
     if dlam_on() and SAFE.match(command):
         print("(DLAM: auto yes)")

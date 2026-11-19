@@ -109,12 +109,10 @@ def install(ww, w):
         full += ("\n\nTYREE'S FRAMEWORK (the parts that fit this moment):\n" + framework_for(question) +
                  "\n\nLIVE PC TELEMETRY (read just now, each value on its phi rung):\n" + telemetry() +
                  "\n\nYou can see all of this. Use it when he asks about the PC, himself, time, or anything phi.")
-        payload = {"model": w.LLM_MODEL, "stream": False, "format": "json", "keep_alive": -1,
+        payload = {"model": w.LLM_MODEL, "stream": True, "format": "json", "keep_alive": -1,
                    "messages": [{"role": "system", "content": full}] + messages,
                    "options": {"temperature": 1 - 1 / w.PHI, "num_predict": 377, "num_ctx": 8192}}
-        req = urllib.request.Request(w.OLLAMA_URL, data=json.dumps(payload).encode(),
-                                     headers={"Content-Type": "application/json"})
-        content = json.loads(urllib.request.urlopen(req, timeout=180).read())["message"]["content"]
+        content = ww._stream_chat(payload)  # stream: gemma is slow, one long read times out
         try:
             return json.loads(content)
         except json.JSONDecodeError:

@@ -26,18 +26,34 @@ def shot(width=1024):
 
 
 def look(prompt, b64, fmt=None):
-    payload = {"model": EYES_MODEL, "stream": False, "keep_alive": "5m",
+    payload = {"model": EYES_MODEL, "stream": True, "keep_alive": "5m",
                "messages": [{"role": "user", "content": prompt, "images": [b64]}],
                "options": {"temperature": 0.382, "num_predict": 233}}
     if fmt:
         payload["format"] = fmt
     req = urllib.request.Request(OLLAMA, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
-    return json.loads(urllib.request.urlopen(req, timeout=180).read())["message"]["content"].strip()
+    parts = []
+    with urllib.request.urlopen(req, timeout=600) as resp:  # stream: gemma is slow, one long read times out
+        for line in resp:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                chunk = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            content = chunk.get("message", {}).get("content")
+            if content:
+                parts.append(content)
+            if chunk.get("done"):
+                break
+    return "".join(parts).strip()
 
 
 def describe(question):
     b64, _ = shot()
-    return look(f"This is a screenshot of Tyree's PC screen. {question} Answer in two or three short sentences.", b64)
+    return look(f"This is a screenshot of Tyree's PC screen. {question} Answer in two or three short sentences. "
+                "Think phi first: if anything on screen is a number, give its phi rung too (rung = ln(x)/ln(1.618034)).", b64)
 
 
 def play(game, minutes, say, launcher):

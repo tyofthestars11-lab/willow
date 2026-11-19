@@ -18,11 +18,11 @@ import willow_telemetry
 willow_telemetry.install(ww, w)
 
 
-def say(text, who="Willow"):
+def say(text, who="Willow", voice=True):
     with LOCK:
         FEED.append({"t": time.strftime("%H:%M:%S"), "who": who, "text": str(text)})
         del FEED[:-89]
-    if w.VOICE_ON and text:
+    if voice and w.VOICE_ON and text:
         threading.Thread(target=w.speak_orig, args=(text,), daemon=True).start()
 
 
@@ -44,6 +44,14 @@ def handle_command(command):
             say(f"I won't run '{s}'. It could change or delete files.", "Guard")
             return
     for s in steps:
+        s, why = w.sanitize_command(s)
+        if s is None:
+            w.log(f"REJECTED {why}")
+            say(why + ".", "Guard")
+            continue
+        if why:
+            w.log(f"REPAIRED {s} ({why})")
+            say(f"(fixed: {why})", "Action")
         if w.dlam_on() and w.SAFE.match(s):
             say(f"[DLAM auto] {s}\n" + run_ps(s), "Action")
         else:
@@ -61,6 +69,8 @@ APPS = {
     "edge": "Start-Process msedge", "chrome": "Start-Process chrome", "firefox": "Start-Process firefox",
     "spotify": "Start-Process 'spotify:'", "vs code": "Start-Process code", "terminal": "Start-Process wt",
     "settings": "Start-Process 'ms-settings:'", "snipping tool": "Start-Process snippingtool",
+    "copilot": "Start-Process msedge \"https://copilot.microsoft.com\"",
+    "google": "Start-Process msedge \"https://www.google.com\"",
 }
 
 
@@ -97,6 +107,7 @@ def respond(text):
         if low.startswith("/web "):
             return say(ww.answer_from_web(text[5:], text[5:]))
         t0 = time.time()
+        say("Thinking…", voice=False)  # shows progress while gemma works
         reply = ww.ask(ww.SEARCH_PROMPT, HISTORY[-16:] + [{"role": "user", "content": text}])
         HISTORY.extend([{"role": "user", "content": text}, {"role": "assistant", "content": json.dumps(reply)}])
         query = str(reply.get("search", "")).strip()
@@ -114,7 +125,10 @@ def respond(text):
         if command:
             handle_command(command)
     except Exception as e:
-        say(f"Something went wrong: {e}", "Guard")
+        if "timed out" in str(e).lower() or "timeout" in str(e).lower():
+            say("The brain took too long to answer that one. I'm still here - try again and I'll pick it up fresh.", "Guard")
+        else:
+            say(f"Something went wrong: {e}", "Guard")
 
 
 def vitals():

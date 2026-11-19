@@ -5,7 +5,8 @@ import os, re, glob, difflib
 KNOWN = {"steam": "steam://open/main", "spotify": "spotify:", "settings": "ms-settings:",
          "notepad": "notepad.exe", "calculator": "calc.exe", "calc": "calc.exe", "paint": "mspaint.exe",
          "task manager": "taskmgr.exe", "file explorer": "explorer.exe", "explorer": "explorer.exe",
-         "terminal": "wt.exe", "snipping tool": "snippingtool.exe"}
+         "terminal": "wt.exe", "snipping tool": "snippingtool.exe",
+         "copilot": "https://copilot.microsoft.com", "google": "https://www.google.com"}
 VERB = re.compile(r"^(?:please\s+)?(?:open|launch|start|run|play|load)\s+(?:up\s+)?(?:the\s+|my\s+)?(?:game\s+)?", re.I)
 
 
