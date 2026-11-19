@@ -1,0 +1,113 @@
+# Sophon-Realtime-32B-Flash：单卡、一条命令（vLLM-Omni）
+
+全双工语音模型，整体作为**一个** vLLM-Omni 模型部署：听用户说话 → 写回复（可带声音标签 `[laughter]` `[cough]` `[sigh]` `[breath]`
+`<laughter>…</laughter>` `<strong>…</strong>`）→ 边写边说。说话段每 80 毫秒出一帧声音，标签会被“演”出来，不会被念出来。
+
+Flash 和 Tag 版共用同一个会写标签的思考器，区别在说话段：Flash 的说话段是自回归、每步一次前向的轻量结构，**首包更快、并发更高**；
+Tag 版的笑更到位。两者接口相同。
+
+## 性能（单张 H100 80 GB，FP8 思考器，`/v1/chat/completions`，用户语音 → 首个声音块）
+
+| 负载 | 首包 中位 / P90 | 卡顿（中位） |
+|---|---|---|
+| 1 路 | **0.31 / 0.34 秒** | 0 |
+| 20 路（10 秒内陆续到达） | 0.45 / 0.52 秒 | 0.09 秒 |
+| 40 路（10 秒内） | 0.58 / 0.67 秒 | 0.37 秒 |
+| 64 路（8 秒内） | 0.84 / 1.03 秒 | 1.9 秒（开始排队） |
+
+- **建议每张 80 GB 卡最多约 40 路并发。** 多卡：每张卡起一个实例，前面加负载均衡。
+- 显存：每个实例约 55 GB。首次启动要编译内核（约 10 分钟），之后 5–8 分钟。
+
+### 声音标签（留出集，Chelsie 音色，DuplexJev 判定）
+
+| 标签 | 中文 | 英文 |
+|---|---|---|
+| `[laughter]` 笑一声 | 83% | 77% |
+| `<laughter>…</laughter>` 边笑边说 | 78% | 71% |
+| `[cough]` 咳嗽 | 90% | 50%（8 句） |
+| `[sigh]` 叹气（AST） | 90% | 100% |
+| 平均字错率 | 0.9% | 1.0% |
+
+- 标签从不被念出来；不写标签时基本不会乱笑。
+- `<strong>` 重读这一版还很弱，下一版补。
+
+## 快速上手
+
+```bash
+bash install.sh                 # 只需一次：Python 3.12 虚拟环境、vLLM 0.30、vLLM-Omni 0.30、插件（国内镜像：PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple）
+# 把权重下载到 ./model（魔搭：modelscope download --model AdventistsAI/Sophon-Realtime-32B-Flash --local_dir ./model）
+GPU=0 PORT=8000 bash start.sh
+python client_example.py --wav 我的问题.wav --lang zh --voice chelsie
+bash stop.sh
+```
+
+音色：`chelsie`（默认）、`brand`；语言用 `language` 指定（`zh` / `en`）。
+
+## 4B 版：一张 24 GB 卡（1.4.0 新增）
+
+[Sophon-Realtime-4B-Flash](https://www.modelscope.cn/models/AdventistsAI/Sophon-Realtime-4B-Flash)（[HF](https://huggingface.co/adventists-ai/Sophon-Realtime-4B-Flash)）用 4B 大脑接同样的发声部分和音色，一张 24 GB 卡就能跑（占用约 21 GB）。
+
+```bash
+bash install.sh
+modelscope download --model AdventistsAI/Sophon-Realtime-4B-Flash --local_dir ./model
+GPU=0 PORT=8000 bash start.sh   # 识别到 4B 模型，自动用 config/sophon_realtime_flash_4b.yaml（8 路对话，不收图片）
+```
+
+| | 4B | 32B（已公布） |
+|---|---|---|
+| Full-Duplex-Bench v1.0（4 项平均） | 87.7 | 94.0 |
+| VoiceBench 总分 | 62.4 | 82.8 |
+| Big Bench Audio | 44.3% | 81.8% |
+| 单路首包（RTX PRO 6000） | 0.21 秒 | — |
+
+4B 大脑保留了接话、附和、被打断就停和声音标签，但知识和推理比 32B 弱很多，会很自信地说错事实。适合本地演示、陪伴和角色对话、话轮研究；需要回答准确时用 32B 版。详见[模型卡](https://www.modelscope.cn/models/AdventistsAI/Sophon-Realtime-4B-Flash)。
+
+## BF16 思考器（不支持 FP8 的硬件）
+
+[Sophon-Realtime-32B-Flash-BF16](https://www.modelscope.cn/models/AdventistsAI/Sophon-Realtime-32B-Flash-BF16)（[HF](https://huggingface.co/adventists-ai/Sophon-Realtime-32B-Flash-BF16)）是未量化的 BF16 思考器，上面的 FP8 思考器就是由它量化而来，发声部分和音色相同。适合不支持 FP8 的硬件（例如昇腾 NPU），或者想自己做量化。BF16 思考器本身约需 64 GB，一般用两张卡做张量并行：在配置里给第 0 阶段设 `tensor_parallel_size: 2`、`devices: '0,1'`。已在两张 H100 上验证：能加载、实时对话正常，首包 0.21–0.27 秒。单张 80 GB 显卡请继续用 FP8 版。
+
+## Flash-4bit：一张 32 GB 显卡
+
+[Sophon-Realtime-32B-Flash-4bit](https://modelscope.cn/models/AdventistsAI/Sophon-Realtime-32B-Flash-4bit) 是把本版本的思考器压成 4 位权重的版本，
+占用显存约 30 GB（完整版约 55 GB），面向一到两路对话。代码、接口、音色和克隆都相同。
+
+```bash
+bash install.sh
+modelscope download --model AdventistsAI/Sophon-Realtime-32B-Flash-4bit --local_dir ./model
+CONFIG=sophon_realtime_flash_32g.yaml GPU=0 PORT=8000 bash start.sh
+```
+
+- 与 Flash 对比（一张 H100，同一套脚本）：CMMLU 85.5 对 87.1，MMLU-Pro 57.1 对 58.4；写标签、语音清晰度、轮次判断没有变化。首包 0.24 秒；
+  两路同时说长回复不会落后。`/v1/realtime` 比 Flash 慢约 0.1 秒（32 GB 配置的缓存较小）。
+- 32 GB 配置的上下文是 4096 token，图像输入关闭。显存 48 GB 以上时，可以复制配置并调大 `gpu_memory_utilization`、`max_model_len`、`max_num_seqs`：
+  4 位权重配完整版的设置占约 42 GB。
+- 在 RTX PRO 6000 Blackwell 上按 32 GB 预算实测（占用 30.5 GB）：一路对话没有卡顿；两路同时说长回复时开头落后 0.3–0.75 秒。
+  尚未在真实的 RTX 5090 上运行过；请不要接显示器、不要同时跑别的程序。24 GB 不够。
+- 第一次启动需要 CUDA 工具包（`CUDA_HOME`）来编译内核。
+
+## 零样本音色克隆
+
+给一段想要的声音，起个名字，就能像内置音色一样使用。不用微调，不用重启。
+
+```bash
+cp alice.wav model/voices/alice.wav   # 同一个人 3–10 秒的干净语音（wav 或 flac，采样率不限）
+python client_example.py --wav 我的问题.wav --lang zh --voice alice
+```
+
+- 第一次用到该音色时准备好并缓存。换音色直接覆盖文件，删音色直接删文件，下一个请求生效。音色名用小写（`a-z 0-9 _ - .`）。
+- `/v1/chat/completions`（`"voice": "alice"`）和 `/v1/realtime`（`session.update` 里 `"voice": "alice"`）都支持；首包延迟与内置音色相同；
+  声音标签照常生效。
+- 参考音的语言可以和回复不同（跨语言）。想把音色放在 `model/` 以外，设 `SOPHON_VOICES=/路径`。
+- 查找顺序：`<音色>_<语言>` → `<音色>`，所以可以用 `alice_zh.wav` + `alice_en.wav` 给中英文各配一段参考音。找不到或读不了的音色会回落到
+  `chelsie`，服务日志里有警告。
+- **只克隆你本人或已获授权的声音，不得用于冒充他人或欺诈。**
+
+## 接口说明
+- `/v1/chat/completions`：系统提示请用 `config/system_prompt.json` 里的（模型按它调过，不带会少写标签）；用户语音放 `input_audio`；
+  `"modalities": ["text","audio"]`，可选 `"voice"`、`"language"`。文字流保留标签（显示时可自行去掉）；音频流为 base64 WAV 块（24 kHz）。
+- `/v1/realtime`：OpenAI Realtime 风格会话；持续发送 `input_audio_buffer.append`，话轮由模型自己判断。
+
+## 目录
+`model/`（思考器、说话段、音色）· `plugin/`（vLLM-Omni 插件 `sophon_realtime`）· `config/`（部署配置、系统提示、VAD）· `examples/`
+
+许可：代码 Apache-2.0；模型权重 Apache-2.0，来源见 `NOTICE`。

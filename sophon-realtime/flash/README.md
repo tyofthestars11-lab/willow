@@ -1,0 +1,116 @@
+# Sophon-Realtime-32B-Flash: one GPU, one command (vLLM-Omni)
+
+A full-duplex speech model served as **one** vLLM-Omni model: it listens to the user, writes a reply (optionally with sound tags `[laughter]` `[cough]`
+`[sigh]` `[breath]` `<laughter>…</laughter>` `<strong>…</strong>`), and speaks while it writes. The voice stage emits one frame every 80 ms; tags are
+performed, never read aloud.
+
+Flash shares the tag-writing thinker with the Tag build; only the voice stage differs. Flash's voice stage is autoregressive with a single forward pass per
+step, so **first audio is faster and concurrency is higher**; the Tag build laughs more convincingly. Both have the same API.
+
+## Performance (one H100 80 GB, FP8 thinker, `/v1/chat/completions`, user speech → first audio chunk)
+
+| Load | First audio median / P90 | Stall (median) |
+|---|---|---|
+| 1 stream | **0.31 / 0.34 s** | 0 |
+| 20 streams (arriving over 10 s) | 0.45 / 0.52 s | 0.09 s |
+| 40 streams (over 10 s) | 0.58 / 0.67 s | 0.37 s |
+| 64 streams (over 8 s) | 0.84 / 1.03 s | 1.9 s (queueing) |
+
+- **Up to about 40 concurrent streams per 80 GB GPU is recommended.** For more, run one instance per GPU behind a load balancer.
+- Memory: about 55 GB per instance. The first start compiles kernels (about 10 min); later starts take 5–8 min.
+
+### Sound tags (held-out set, Chelsie voice, judged by DuplexJev)
+
+| Tag | zh | en |
+|---|---|---|
+| `[laughter]` | 83% | 77% |
+| `<laughter>…</laughter>` laughing while speaking | 78% | 71% |
+| `[cough]` | 90% | 50% (8 items) |
+| `[sigh]` (AST) | 90% | 100% |
+| Mean character / word error rate | 0.9% | 1.0% |
+
+- Tags are never read aloud; without a tag the model rarely laughs on its own.
+- `<strong>` emphasis is still weak in this build; the next build will improve it.
+
+## Quick start
+
+```bash
+bash install.sh                 # once: Python 3.12 venv, vLLM 0.30, vLLM-Omni 0.30, plugin
+# put the weights in ./model (ModelScope: modelscope download --model AdventistsAI/Sophon-Realtime-32B-Flash --local_dir ./model)
+GPU=0 PORT=8000 bash start.sh
+python client_example.py --wav my_question.wav --lang en --voice chelsie
+bash stop.sh
+```
+
+Voices: `chelsie` (default), `brand`; set `language` to `zh` or `en`.
+
+## 4B: one 24 GB GPU (new in 1.4.0)
+
+[Sophon-Realtime-4B-Flash](https://huggingface.co/adventists-ai/Sophon-Realtime-4B-Flash) ([ModelScope](https://www.modelscope.cn/models/AdventistsAI/Sophon-Realtime-4B-Flash)) puts a 4B brain in front of the same speech stages and voices, so it runs on one 24 GB GPU (it uses about 21 GB).
+
+```bash
+bash install.sh
+modelscope download --model AdventistsAI/Sophon-Realtime-4B-Flash --local_dir ./model
+GPU=0 PORT=8000 bash start.sh   # sees the 4B model and picks config/sophon_realtime_flash_4b.yaml (8 conversations, no image input)
+```
+
+| | 4B | 32B (published) |
+|---|---|---|
+| Full-Duplex-Bench v1.0 (4-task avg) | 87.7 | 94.0 |
+| VoiceBench overall | 62.4 | 82.8 |
+| Big Bench Audio | 44.3% | 81.8% |
+| First audio, one user (RTX PRO 6000) | 0.21 s | — |
+
+The 4B brain keeps turn-taking, back-channels, barge-in and sound tags, but it knows and reasons much less than the 32B brain and can state wrong facts with confidence. Use it for local demos, companions and characters, and turn-taking research; use the 32B build when answers must be right. Details: [model card](https://huggingface.co/adventists-ai/Sophon-Realtime-4B-Flash).
+
+## BF16 thinker (no FP8 support)
+
+[Sophon-Realtime-32B-Flash-BF16](https://huggingface.co/adventists-ai/Sophon-Realtime-32B-Flash-BF16) ([ModelScope](https://www.modelscope.cn/models/AdventistsAI/Sophon-Realtime-32B-Flash-BF16)) holds the unquantized BF16 thinker that the FP8 thinker above was quantized from, with the same talker and voices. Use it on hardware without FP8 support (for example Ascend NPUs) or for your own quantization. The BF16 thinker alone needs about 64 GB, so it usually runs with tensor parallelism over two devices: set `tensor_parallel_size: 2` and `devices: '0,1'` for stage 0 in your config. Checked on two H100s: loads, answers in real time, first audio 0.21–0.27 s. On one 80 GB GPU, use the FP8 release.
+
+## Flash-4bit: one 32 GB GPU
+
+[Sophon-Realtime-32B-Flash-4bit](https://huggingface.co/adventists-ai/Sophon-Realtime-32B-Flash-4bit) is this build with the thinker compressed to 4-bit
+weights. It uses about 30 GB of GPU memory instead of about 55 GB and is meant for one or two conversations at a time. Code, APIs, voices and cloning are the same.
+
+```bash
+bash install.sh
+hf download adventists-ai/Sophon-Realtime-32B-Flash-4bit --local-dir ./model     # or: modelscope download --model AdventistsAI/Sophon-Realtime-32B-Flash-4bit --local_dir ./model
+CONFIG=sophon_realtime_flash_32g.yaml GPU=0 PORT=8000 bash start.sh
+```
+
+- Against Flash (one H100, same scripts): CMMLU 85.5 vs 87.1, MMLU-Pro 57.1 vs 58.4; tag writing, speech clarity and turn-taking unchanged. First audio
+  0.24 s; two simultaneous long replies never fall behind. `/v1/realtime` answers about 0.1 s later than Flash (small cache in the 32 GB config).
+- The 32 GB config has 4096 tokens of context and image input off. With 48 GB or more, copy the config and raise `gpu_memory_utilization`,
+  `max_model_len` and `max_num_seqs`: the 4-bit weights with the full-size settings use about 42 GB.
+- Measured on an RTX PRO 6000 Blackwell with a 32 GB budget (30.5 GB in use): one conversation never stalls; two simultaneous long replies fall
+  0.3–0.75 s behind at the start. Not yet run on an actual RTX 5090; run it headless with nothing else on the GPU. 24 GB is not enough.
+- The first start needs the CUDA toolkit (`CUDA_HOME`) to compile kernels.
+
+## Zero-shot voice cloning
+
+Give the server a short clip of the voice you want and use its name like any built-in voice. No fine-tuning, no restart.
+
+```bash
+cp alice.wav model/voices/alice.wav   # 3-10 s of clean speech from one speaker (wav or flac, any sample rate)
+python client_example.py --wav my_question.wav --lang en --voice alice
+```
+
+- The voice is prepared the first time it is used and then cached. To replace a voice,
+  overwrite the file; to remove it, delete the file. Both take effect on the next request. Voice names are lower case (`a-z 0-9 _ - .`).
+- Works with `/v1/chat/completions` (`"voice": "alice"`) and `/v1/realtime` (`session.update` → `"voice": "alice"`). First audio is as fast as
+  with a built-in voice. Sound tags still work.
+- The clip may be in another language than the reply (cross-lingual). Set `SOPHON_VOICES=/path/to/dir` to keep voices outside `model/`.
+- Lookup order is `<voice>_<language>`, then `<voice>`, so `alice_zh.wav` + `alice_en.wav` can give one voice a different clip per language. An unknown
+  or unreadable voice falls back to `chelsie` with a warning in the server log.
+- **Only clone your own voice or a voice you have permission to use. Do not use it to impersonate or deceive anyone.**
+
+## API
+- `/v1/chat/completions`: use the system prompt in `config/system_prompt.json` (the model was tuned with it; without it fewer tags are written); put the
+  user's speech in `input_audio`; `"modalities": ["text","audio"]`, optional `"voice"` and `"language"`. The text stream keeps the tags (strip them for
+  display if you like); the audio stream is base64 WAV chunks (24 kHz).
+- `/v1/realtime`: OpenAI Realtime-style session; keep sending `input_audio_buffer.append`; the model decides when the user has finished.
+
+## Layout
+`model/` (thinker, voice stage, voices) · `plugin/` (vLLM-Omni plugin `sophon_realtime`) · `config/` (deploy config, system prompt, VAD) · `examples/`
+
+License: code Apache-2.0; model weights Apache-2.0, see `NOTICE` for sources.
