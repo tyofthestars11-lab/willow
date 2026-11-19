@@ -4,15 +4,20 @@
 import ast, json, math, operator, os, re, subprocess, urllib.parse, urllib.request
 import willow_type as w
 
-# Phi framework: Willow's working copy, loaded from phi/phi-framework.md next to this file.
+# Phi framework: the full thing. Willow's working copy (phi-framework.md) plus the
+# complete doctrine (phi/FRAMEWORK.md), loaded together into every answer.
 # Both surfaces (widget + site) funnel through ask(), so one load covers her everywhere.
-# If the file is missing, PHI_FRAMEWORK is empty and nothing changes.
-_PHI_FRAMEWORK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "phi", "phi-framework.md")
-try:
-    with open(_PHI_FRAMEWORK_PATH, encoding="utf-8") as _f:
-        PHI_FRAMEWORK = _f.read().strip()
-except Exception:
-    PHI_FRAMEWORK = ""
+# If a file is missing, that part is empty and the rest still loads.
+def _load_phi_text(name):
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "phi", name), encoding="utf-8") as _f:
+            return _f.read().strip()
+    except Exception:
+        return ""
+
+PHI_FRAMEWORK = "\n\n".join(
+    part for part in (_load_phi_text("phi-framework.md"), _load_phi_text("FRAMEWORK.md")) if part
+)
 
 SEARCH_PROMPT = w.SYSTEM_PROMPT + (
     " You can search the internet. If he asks about anything current, a fact you are unsure of, "
@@ -193,7 +198,7 @@ def stabilize_say(say):
 def ask(system, messages):
     payload = {"model": w.LLM_MODEL, "stream": True, "format": "json", "keep_alive": -1,
                "messages": [{"role": "system", "content": (PHI_FRAMEWORK + "\n\n" + system) if PHI_FRAMEWORK else system}] + messages,
-               "options": {"temperature": 1 - 1 / w.PHI, "num_predict": 144, "num_ctx": 4096}}
+               "options": {"temperature": 1 - 1 / w.PHI, "num_predict": 144, "num_ctx": 8192}}
     content = _stream_chat(payload)
     try:
         data = json.loads(content)
