@@ -119,7 +119,7 @@ def _stream_chat(payload, timeout=600):
 def ask(system, messages):
     payload = {"model": w.LLM_MODEL, "stream": True, "format": "json", "keep_alive": -1,
                "messages": [{"role": "system", "content": (PHI_FRAMEWORK + "\n\n" + system) if PHI_FRAMEWORK else system}] + messages,
-               "options": {"temperature": 1 - 1 / w.PHI, "num_predict": 377, "num_ctx": 8192}}
+               "options": {"temperature": 1 - 1 / w.PHI, "num_predict": 144, "num_ctx": 4096}}
     content = _stream_chat(payload)
     try:
         return json.loads(content)

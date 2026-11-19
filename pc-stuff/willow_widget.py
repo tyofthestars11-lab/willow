@@ -208,7 +208,7 @@ def _respond(text):
             return say(ww.answer_from_web(text[5:], text[5:]))
         UIQ.put(("status", "Thinking…"))
         t0 = time.time()
-        reply = ww.ask(ww.SEARCH_PROMPT, HISTORY[-16:] + [{"role": "user", "content": text}])
+        reply = ww.ask(ww.SEARCH_PROMPT, HISTORY[-8:] + [{"role": "user", "content": text}])
         HISTORY.extend([{"role": "user", "content": text}, {"role": "assistant", "content": json.dumps(reply)}])
         query = str(reply.get("search", "")).strip()
         if query:
