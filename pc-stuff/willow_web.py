@@ -4,6 +4,16 @@
 import ast, json, math, operator, os, re, subprocess, urllib.parse, urllib.request
 import willow_type as w
 
+# Phi framework: Willow's working copy, loaded from phi/phi-framework.md next to this file.
+# Both surfaces (widget + site) funnel through ask(), so one load covers her everywhere.
+# If the file is missing, PHI_FRAMEWORK is empty and nothing changes.
+_PHI_FRAMEWORK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "phi", "phi-framework.md")
+try:
+    with open(_PHI_FRAMEWORK_PATH, encoding="utf-8") as _f:
+        PHI_FRAMEWORK = _f.read().strip()
+except Exception:
+    PHI_FRAMEWORK = ""
+
 SEARCH_PROMPT = w.SYSTEM_PROMPT + (
     " You can search the internet. If he asks about anything current, a fact you are unsure of, "
     "news, prices, weather, or a website, add \"search\": \"short web query\" to your JSON and leave "
@@ -108,7 +118,7 @@ def _stream_chat(payload, timeout=600):
 
 def ask(system, messages):
     payload = {"model": w.LLM_MODEL, "stream": True, "format": "json", "keep_alive": -1,
-               "messages": [{"role": "system", "content": system}] + messages,
+               "messages": [{"role": "system", "content": (PHI_FRAMEWORK + "\n\n" + system) if PHI_FRAMEWORK else system}] + messages,
                "options": {"temperature": 1 - 1 / w.PHI, "num_predict": 377, "num_ctx": 8192}}
     content = _stream_chat(payload)
     try:
