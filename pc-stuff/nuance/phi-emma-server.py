@@ -33,6 +33,7 @@ NUANCE_API = "https://api.nuancelabs.ai"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROMPT_FILE = os.path.join(BASE_DIR, "phi-emma-system-prompt.md")
 TALK_FILE = os.path.join(BASE_DIR, "phi-emma-talk.html")
+LIVEKIT_FILE = os.path.join(BASE_DIR, "livekit-client.umd.js")
 PID_FILE = os.path.join(BASE_DIR, "phi-emma-server.pid")
 PERSONA_ID = "sonia"
 END_USER_ID = "tyree"
@@ -151,6 +152,12 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path == "/":
             self._send_file(TALK_FILE, "text/html; charset=utf-8")
+        elif path == "/livekit-client.umd.js":
+            # LiveKit is bundled next to the server so the page never
+            # depends on a CDN. The unpkg .umd.min.js URL the page used
+            # to point at does not exist (404), which is why she could
+            # not join her room. This file is the published 2.24.1 UMD.
+            self._send_file(LIVEKIT_FILE, "text/javascript; charset=utf-8")
         elif path == "/api/token":
             token, err = mint_token()
             if err:

@@ -96,7 +96,7 @@
 </main>
 <footer>&phi;&#178; = &phi; + 1 &nbsp;·&nbsp; the golden ratio is infinite &nbsp;·&nbsp; all free, all phi</footer>
 
-<script src="https://unpkg.com/livekit-client@2.24.1/dist/livekit-client.umd.min.js"></script>
+<script src="/livekit-client.umd.js"></script>
 <script>
 (function () {
   "use strict";
@@ -244,7 +244,7 @@
 
   function joinRoom(livekitUrl, livekitToken) {
     if (!window.LivekitClient) {
-      showError("The LiveKit library did not load — check the network and reload the page. No token was spent.");
+      showError("The LiveKit library did not load — the local livekit-client.umd.js file is missing next to the talk page. Re-run the flash script and reload. No token was spent.");
       return Promise.reject(new Error("livekit missing"));
     }
     room = new LivekitClient.Room();
@@ -461,7 +461,7 @@
   });
 
   if (!window.LivekitClient) {
-    showError("The LiveKit library did not load — check the network and reload the page.");
+    showError("The LiveKit library did not load — the local livekit-client.umd.js file is missing next to the talk page. Re-run the flash script and reload.");
   }
 })();
 </script>
