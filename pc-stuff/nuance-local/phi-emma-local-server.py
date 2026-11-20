@@ -32,8 +32,10 @@ Self-heal: the brain check is Ollama up AND gemma3:12b present. If Ollama
 is up but the model is missing (a stale Ollama pointed at the wrong folder),
 the server restarts Ollama from the D: model folder. If the model is still
 missing, it downloads gemma3:12b in the background and the chat route says
-so plainly until it arrives. The server stays up and answering the whole
-time - a missing brain never takes the page down.
+so plainly until it arrives. The server binds port 1620 FIRST and heals
+the brain in a background thread, so the page answers from second zero
+even while the heal is still running - a missing brain never takes the
+page down, and never delays it either.
 """
 import io
 import json
@@ -239,6 +241,34 @@ def _ensure_ollama():
             _log("Her brain is downloading in the background. "
                  "Chat will say so until it arrives.")
         return False
+
+
+_HEAL_RUNNING = False
+_HEAL_LOCK = threading.Lock()
+
+
+def _heal_worker():
+    """Run the brain heal, then clear the running flag. Runs in a daemon
+    thread so the server keeps answering while it works."""
+    global _HEAL_RUNNING
+    try:
+        _ensure_ollama()
+    finally:
+        with _HEAL_LOCK:
+            _HEAL_RUNNING = False
+
+
+def _kick_heal():
+    """Start the brain heal in a background thread if it is not already
+    running. Never blocks the caller: the page keeps answering while
+    Ollama is restarted or the model downloads."""
+    global _HEAL_RUNNING
+    with _HEAL_LOCK:
+        if _HEAL_RUNNING:
+            return False
+        _HEAL_RUNNING = True
+    threading.Thread(target=_heal_worker, daemon=True).start()
+    return True
 
 
 def _ollama_chat(messages, num_predict=377):
@@ -489,7 +519,14 @@ class Handler(BaseHTTPRequestHandler):
         messages = ([{"role": "system", "content": SYSTEM_PROMPT}]
                     + clean_history
                     + [{"role": "user", "content": message}])
-        if not _ensure_ollama():
+        # Fast check only — never block the reply on the heal. The heal
+        # runs in a background thread (see main); this route just reports
+        # whether the brain is ready right now and kicks the heal if not.
+        # The old code called _ensure_ollama() here, which can hold its
+        # lock for 30+ seconds while the heal restarts Ollama — a chat
+        # sent during the heal would hang instead of getting its 503.
+        if not (_ollama_up() and _model_present()):
+            _kick_heal()
             if _PULLING:
                 self._send_json(503, {"error": "Her brain (gemma3:12b) is still downloading into Ollama. Give it a few minutes, then Send again."})
             else:
@@ -510,11 +547,19 @@ def main():
     except Exception:
         pass
     try:
-        _ensure_ollama()
+        # Bind FIRST, heal behind. The old order ran _ensure_ollama()
+        # before the server bound the port, and the heal can take 30+
+        # seconds (stop Ollama, start Ollama, wait for the model) - during
+        # that whole window nothing listened on 1620, so the browser got
+        # ERR_CONNECTION_REFUSED and the flash's page retries could miss
+        # it. Now the page answers from second zero; the brain heals in a
+        # background thread and the chat route says plainly (503) until
+        # it arrives.
+        server = ThreadingHTTPServer((HOST, PORT), Handler)
         _log(f"Phi Emma (local) serving {BASE_DIR}")
         _log(f"Open http://{HOST}:{PORT} - no Nuance, no credits, no key.")
         _log(f"Brain: local Ollama {MODEL}. Voice: Kokoro {EMMA_VOICE} (browser fallback).")
-        server = ThreadingHTTPServer((HOST, PORT), Handler)
+        _kick_heal()
         try:
             server.serve_forever()
         except KeyboardInterrupt:
