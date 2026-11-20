@@ -272,11 +272,6 @@ def _place_chat():
 
 def _show_bubble():
     _mode["chat"] = False
-    try:
-        we_ears.pause_listening()
-    except Exception:
-        pass
-    UIQ.put(("ears", "off"))
     chat.pack_forget()
     bubble.pack(fill="both", expand=True)
     _place_bubble()
@@ -288,13 +283,6 @@ def _show_chat():
     chat.pack(fill="both", expand=True)
     _place_chat()
     entry.focus_set()
-    # Joining her turns her ears on. They stay on only while we're open.
-    try:
-        we_ears.start_listening(respond, say, w)
-        UIQ.put(("ears", "listening"))
-    except Exception as e:
-        UIQ.put(("ears", "off"))
-        UIQ.put(("say", "Guard", f"Mic didn't start ({e}). Type instead — I still talk back."))
 
 
 def _quit():
@@ -416,7 +404,7 @@ def _build_ui():
     head = tk.Frame(chat, bg=PANEL)
     head.pack(fill="x")
     tk.Label(head, text="φ  WILLOW", fg=GOLD2, bg=PANEL, font=FONT_B).pack(side="left", padx=8, pady=6)
-    mic_lbl = tk.Label(head, text="● Ears off", fg=DIM, bg=PANEL, font=("Consolas", 9))
+    mic_lbl = tk.Label(head, text="● Starting…", fg=DIM, bg=PANEL, font=("Consolas", 9))
     mic_lbl.pack(side="left", padx=4)
     tk.Button(head, text="×", fg=RED, bg=PANEL, bd=0, font=FONT_B, command=_quit).pack(side="right", padx=4)
     tk.Button(head, text="—", fg=DIM, bg=PANEL, bd=0, font=FONT_B, command=_show_bubble).pack(side="right")
@@ -461,7 +449,7 @@ def _build_ui():
 
     status_lbl = tk.Label(chat, text="Starting…", fg=DIM, bg=BG, font=("Consolas", 9), anchor="w")
     status_lbl.pack(fill="x", padx=10, pady=(0, 6))
-    tk.Label(chat, text="I listen only while we're open — talk or type. DLAM on, phi first, all local.",
+    tk.Label(chat, text="Listening — say Willow. DLAM on, phi first, all local.",
              fg=DIM, bg=BG, font=("Consolas", 9), anchor="w").pack(fill="x", padx=10, pady=(0, 8))
 
     bubble.pack(fill="both", expand=True)
@@ -506,6 +494,39 @@ def _stop_ollama():
     return not _ollama_up()
 
 
+def _pull_model(env):
+    # Download the brain into the serving instance's store. Ollama pull is
+    # slow (~8 GB), so poll instead of blocking on a pipe — its progress
+    # output would fill a pipe buffer and deadlock. Output goes to a log
+    # file; only the tail is read if it fails.
+    log_path = HERE / "ollama_pull.log"
+    try:
+        with open(log_path, "w", encoding="utf-8") as lf:
+            proc = subprocess.Popen(["ollama", "pull", w.LLM_MODEL], env=env,
+                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                                    stdout=lf, stderr=subprocess.STDOUT)
+    except Exception as e:
+        return False, f"couldn't start the download: {e}"
+    deadline = time.time() + 1800  # 30 minutes for ~8 GB
+    while proc.poll() is None:
+        if time.time() > deadline:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return False, "the download took longer than 30 minutes"
+        time.sleep(5)
+    if proc.returncode != 0:
+        tail = ""
+        try:
+            lines = log_path.read_text(encoding="utf-8", errors="replace").strip().splitlines()
+            tail = lines[-1][:300] if lines else ""
+        except Exception:
+            pass
+        return False, f"the download failed (exit {proc.returncode})" + (f": {tail}" if tail else "")
+    return True, ""
+
+
 def _ensure_ollama():
     if _ollama_up() and _model_present():
         return True
@@ -526,7 +547,25 @@ def _ensure_ollama():
         time.sleep(1)
         if _ollama_up() and _model_present():
             return True
-    UIQ.put(("say", "Guard", "Ollama is up but gemma3:12b is not in its model folder. Check D:\\PhiMove\\.ollama\\models, then restart me."))
+    # The restart didn't bring the model back — it is genuinely absent
+    # from disk, so no restart will fix it. Download it into the serving
+    # instance's store. This is the fix, and it runs itself: the pull
+    # lands wherever the running server keeps its models, so it heals
+    # the 404 even if the old server is still the one holding the port.
+    if not _ollama_up():
+        UIQ.put(("say", "Guard", "Ollama still isn't answering after the restart, so I can't download the brain."))
+        return False
+    UIQ.put(("status", "Willow's brain is downloading — one moment, this is the fix."))
+    say("My brain is downloading — one moment, this is the fix.")
+    ok, why = _pull_model(env)
+    if not ok:
+        UIQ.put(("say", "Guard", f"The brain download failed ({why}). I tried restarting Ollama from the D: folder and downloading gemma3:12b — nothing for you to check."))
+        return False
+    for _ in range(60):
+        time.sleep(1)
+        if _model_present():
+            return True
+    UIQ.put(("say", "Guard", "The brain downloaded but Ollama still doesn't list gemma3:12b. I tried restarting from the D: folder and downloading it."))
     return False
 
 
@@ -535,25 +574,27 @@ def _boot():
         willow_telemetry.install(ww, w)
     except Exception as e:
         UIQ.put(("say", "Guard", f"Telemetry didn't load: {e}"))
-    if _ensure_ollama():
-        UIQ.put(("status", "Brain awake"))
-    else:
-        UIQ.put(("say", "Guard", "Ollama isn't answering. Start it and I'll wake up."))
-        UIQ.put(("status", "Brain offline"))
+    # Her ears are ON from boot. She always listens for "Willow" — the
+    # wake word is the only gate. Speech without it is ignored, never
+    # transcribed into her chat.
+    try:
+        we_ears.start(respond, say, w)
+        UIQ.put(("ears", "listening"))
+    except Exception as e:
+        UIQ.put(("ears", "off"))
+        UIQ.put(("say", "Guard", f"Mic didn't start ({e}). Type instead — I still talk back."))
     try:
         with urllib.request.urlopen("http://127.0.0.1:1618/api/vitals", timeout=1) as r:
             if r.status == 200:
                 UIQ.put(("say", "Guard", "Note: the Command Center site is also running — she'll answer in both places. Close that window for widget-only."))
     except Exception:
         pass
-    # Voice only at boot. Her ears stay OFF until Tyree joins her by
-    # opening the chat — she never listens just because the mic is on.
-    try:
-        we_ears.start_voice(w)
-    except Exception as e:
-        UIQ.put(("say", "Guard", f"Voice didn't start ({e}). Text still works."))
-    UIQ.put(("ears", "off"))
-    say("I'm here, Tyree. Click me to talk — I only listen when we're open. Or just type.")
+    if _ensure_ollama():
+        UIQ.put(("status", "Brain awake"))
+    else:
+        UIQ.put(("say", "Guard", "Ollama isn't answering. Start it and I'll wake up."))
+        UIQ.put(("status", "Brain offline"))
+    say("I'm here, Tyree. Talk to me or type — I'm listening.")
 
 
 def main():

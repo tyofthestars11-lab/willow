@@ -7,11 +7,11 @@ VOICE = "af_heart"  # Kokoro voice: try af_bella, af_nicole, bf_emma
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 SPEAKING = threading.Event()
-# The listen gate: ears hear only while this is set. The widget sets it when
-# Tyree joins her (opens her chat) and clears it when he leaves (collapses
-# back to the bubble). The Command Center sets it at startup, because
-# launching the site IS joining her there. Nothing is transcribed or acted
-# on while this is clear.
+# The listen gate: ears hear only while this is set. It is set at boot by
+# start_listening and stays set — her ears are always on. The WAKE WORD is
+# the only gate on what becomes input: speech without "Willow" is ignored
+# outright, never transcribed into her chat. The Command Center sets it at
+# startup the same way, because launching the site IS joining her there.
 LISTENING = threading.Event()
 _LOOP_STARTED = False
 _LOOP_LOCK = threading.Lock()
@@ -24,17 +24,39 @@ VOICE_Q = queue.Queue()
 JUNK = {"", "you", "thank you", "thanks for watching", "bye", "uh", "um", "hmm"}
 
 
-def start_voice(w):
-    # Kokoro voice only: install her spoken voice. No listening.
-    def voice_worker():
-        # One voice at a time. Kokoro loads once and plays through your speakers.
-        kokoro = None
+def _load_kokoro():
+    # Her voice, Kokoro af_heart. Retries once — a slow or locked voice
+    # file can fail the first load and recover on its own. Returns
+    # (kokoro, sounddevice) or (None, None) if it really won't load.
+    last = None
+    for attempt in range(2):
         try:
             import sounddevice as sd
             from kokoro_onnx import Kokoro
             kokoro = Kokoro(os.path.join(HERE, "kokoro-v1.0.onnx"), os.path.join(HERE, "voices-v1.0.bin"))
+            return kokoro, sd
         except Exception as e:
-            print(f"Kokoro voice not loaded ({e}); using the old voice.")
+            last = e
+            print(f"Kokoro voice load attempt {attempt + 1} failed ({e}).")
+            if attempt == 0:
+                time.sleep(2)
+    print(f"Kokoro voice not loaded ({last}); using the old voice.")
+    return None, None
+
+
+def start_voice(w, say=None):
+    # Kokoro voice only: install her spoken voice. No listening.
+    # If Kokoro won't load even after a retry, fall back to the system
+    # voice and say so plainly in the widget instead of silently
+    # sounding like a robot.
+    def voice_worker():
+        # One voice at a time. Kokoro loads once and plays through your speakers.
+        kokoro, sd = _load_kokoro()
+        if kokoro is None and say is not None:
+            try:
+                say("Voice fell back to system voice — Kokoro did not load.", "Guard", voice=False)
+            except Exception:
+                pass
         while True:
             text = VOICE_Q.get()
             SPEAKING.set()
@@ -94,8 +116,7 @@ def _listen_loop(respond, say, w):
     except Exception as e:
         say(f"My ears didn't start: {e}", "Guard")
         return
-    say("Ears on — listening while we're together. DLAM locked on. Just talk.", "Action")
-    paused = False
+    say("Ears on — say Willow and I'll answer. DLAM locked on.", "Action")
     while True:
         if not LISTENING.is_set():
             # Not joined: drain the mic buffer so nothing said to anyone else
@@ -118,24 +139,39 @@ def _listen_loop(respond, say, w):
         woke, rest = ear.strip_wake(heard)
         low = heard.lower()
         if "stop listening" in low:
-            paused = True
             say("Paused. Say Willow when you need me.")
             continue
-        if paused:
-            if not woke:
-                continue
-            paused = False
+        if not woke:
+            # No wake word: not for her. Ignore it completely — do not
+            # transcribe it into her chat, do not answer it. His talk to
+            # Phi Emma or anyone else stays out of here.
+            continue
         if not w.dlam_on():
             w.DLAM_FILE.write_text("on", encoding="utf-8")
-        msg = rest if woke else heard
+        msg = rest
         if msg.lower().strip(" .!?,") in ("", "hey", "hi"):
+            # Bare wake word — she woke, so the next thing he says is the
+            # command. No second wake word needed.
             say("Yes?")
-            continue
+            for _ in range(20):
+                if not SPEAKING.is_set():
+                    break
+                time.sleep(0.1)
+            try:
+                ear.drain()
+            except Exception:
+                pass
+            heard = ear.hear(timeout=8)
+            if not heard or not LISTENING.is_set():
+                continue
+            msg = heard
+            if msg.lower().strip(" .!?,") in ("", "hey", "hi"):
+                continue
         respond(msg)
 
 
 def start(respond, say, w):
-    # The Command Center path: voice + listening together, as before.
-    # Launching the site IS joining her there, so her ears start with it.
-    start_voice(w)
+    # Voice + listening together, as before. Launching the site IS
+    # joining her there, and the widget starts her ears at boot the same way.
+    start_voice(w, say=say)
     start_listening(respond, say, w)
