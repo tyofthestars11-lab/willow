@@ -35,10 +35,19 @@ cannot see it, because it was started pointing at a folder that does
 not hold it - so `ollama list` looks empty and the model looks missing.
 This server FINDS the model on disk instead of downloading it again:
 it scans D:\\PhiMove\\.ollama\\models then C:\\Users\\Admin\\.ollama\\models
-for the gemma3:12b manifest and its blobs. If a folder has it, Ollama
-is restarted ONCE from that folder and the brain appears. If no folder
-has it, the server says so plainly and stops - it never downloads.
-There is no download anywhere in this file.
+for the gemma3:12b manifest and verifies EVERY blob it names - the blob
+must exist, its size must match the manifest, and its SHA-256 must match
+its digest. A half-moved or truncated copy passes an existence check
+but Ollama rejects it, so a folder only counts when every blob verifies.
+If a folder has it, Ollama is restarted ONCE from that folder and the
+restart is PROVED: every ollama.exe is killed, the port is polled until
+it is actually free, and the new server must own port 11434 and list
+the model before the restart counts as done. If the port never frees,
+or the model still is not listed after a verified restart, the server
+says exactly which step failed instead of pretending the restart
+worked. If no folder has it, the server says so plainly - naming the
+folders checked and which blobs are bad - and stops. It never
+downloads. There is no download anywhere in this file.
 
 No console shell anywhere in this file either. Ollama is started and
 stopped with hidden Python subprocesses (CREATE_NO_WINDOW), so no
@@ -48,9 +57,11 @@ background thread, so the page answers from second zero even while
 the heal is still running - a missing brain never takes the page down,
 and never delays it either.
 """
+import hashlib
 import io
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -189,69 +200,358 @@ def _port_free(port):
         return False
 
 
-def _model_in_dir(models_dir):
-    """True if the given model folder holds a COMPLETE gemma3:12b:
-    the manifest AND every blob it names (config + layers). Ollama
-    keeps one manifest per model under manifests/registry.ollama.ai/
-    library/<name>/<tag>, and the blobs under blobs/sha256-<hex>.
-    A manifest with missing blobs is not a model - it is a half-moved
-    or half-downloaded one, and restarting from that folder buys
-    nothing, so it counts as not found."""
+def _parse_netstat_owner(text, port):
+    """Parse Windows `netstat -ano` output; return the PID listening on
+    127.0.0.1:port, or None. Unit-testable: the text is the only input."""
+    want = "127.0.0.1:%d" % port
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 5:
+            continue
+        if parts[0] != "TCP":
+            continue
+        if parts[1] == want and parts[3] == "LISTENING":
+            try:
+                return int(parts[4])
+            except ValueError:
+                return None
+    return None
+
+
+def _parse_proc_net_tcp_owner(text, port):
+    """Parse Linux /proc/net/tcp text; return the inode of the socket
+    LISTENING on 127.0.0.1:port, or None. 127.0.0.1 is 0100007F in
+    little-endian hex; the port is hex; state 0A is LISTEN."""
+    want_ip = "0100007F"
+    want_port = "%04X" % port
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 10 or ":" not in parts[1]:
+            continue
+        ip, prt = parts[1].split(":")
+        if ip == want_ip and prt == want_port and parts[3] == "0A":
+            try:
+                return int(parts[9])
+            except ValueError:
+                return None
+    return None
+
+
+def _port_owner_pid(port):
+    """The PID of the process listening on 127.0.0.1:port, or None if it
+    cannot be determined. Windows: hidden netstat -ano. Linux: the
+    listening socket's inode from /proc/net/tcp, matched to a process
+    through /proc/<pid>/fd. Best effort - None just means 'cannot tell',
+    never 'nobody'."""
+    if os.name == "nt":
+        try:
+            out = subprocess.run(
+                ["netstat", "-ano"],
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                timeout=10, text=True)
+            return _parse_netstat_owner(out.stdout or "", port)
+        except Exception:
+            return None
+    try:
+        with open("/proc/net/tcp", encoding="utf-8") as f:
+            inode = _parse_proc_net_tcp_owner(f.read(), port)
+    except Exception:
+        return None
+    if inode is None:
+        return None
+    want = "socket:[%d]" % inode
+    try:
+        pids = [p for p in os.listdir("/proc") if p.isdigit()]
+    except Exception:
+        return None
+    for pid in pids:
+        try:
+            for fd in os.listdir("/proc/" + pid + "/fd"):
+                try:
+                    if os.readlink("/proc/" + pid + "/fd/" + fd) == want:
+                        return int(pid)
+                except OSError:
+                    continue
+        except OSError:
+            continue
+    return None
+
+
+def _pid_image_name(pid):
+    """The image/command of a PID, or None. Windows: hidden tasklist.
+    Linux: /proc/<pid>/cmdline."""
+    if pid is None:
+        return None
+    if os.name == "nt":
+        try:
+            out = subprocess.run(
+                ["tasklist", "/FI", "PID eq %d" % pid, "/FO", "CSV", "/NH"],
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                timeout=10, text=True)
+            line = (out.stdout or "").strip()
+            if line.startswith('"'):
+                return line.split('"')[1]
+        except Exception:
+            pass
+        return None
+    try:
+        with open("/proc/%d/cmdline" % pid, "rb") as f:
+            raw = f.read()
+        parts = [p for p in raw.split(b"\x00") if p]
+        if parts:
+            return parts[0].decode("utf-8", "replace")
+    except Exception:
+        pass
+    return None
+
+
+def _pid_alive(pid):
+    """True if the PID exists right now."""
+    if pid is None:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _kill_ollama_processes():
+    """Kill ALL ollama processes, hidden - not just this server's own
+    child, not just the port listener. Windows: hidden taskkill /F /IM
+    ollama.exe. Linux: every process whose cmdline names ollama (except
+    this server itself), SIGTERM then SIGKILL. Returns (killed_any,
+    detail)."""
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/IM", "ollama.exe"],
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=20)
+            return True, "taskkill /F /IM ollama.exe ran"
+        except FileNotFoundError:
+            return False, "taskkill not found"
+        except Exception as e:
+            return False, "taskkill failed (%s)" % e
+    try:
+        pids = []
+        for pid in [p for p in os.listdir("/proc") if p.isdigit()]:
+            if int(pid) == os.getpid():
+                continue
+            try:
+                with open("/proc/" + pid + "/cmdline", "rb") as f:
+                    cmd = f.read().decode("utf-8", "replace")
+            except OSError:
+                continue
+            if "ollama" in cmd:
+                pids.append(int(pid))
+    except Exception:
+        return False, "could not list processes"
+    if not pids:
+        return False, "no ollama process found"
+    killed_any = bool(pids)
+    total = len(pids)
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    deadline = time.time() + 3
+    while time.time() < deadline and pids:
+        pids = [p for p in pids if _pid_alive(p)]
+        if pids:
+            time.sleep(0.2)
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    if killed_any:
+        return True, "killed %d ollama process(es)" % total
+    return False, "no ollama process found"
+
+
+_VERIFY_CACHE = {}
+
+
+def _manifest_digests(models_dir):
+    """Read the gemma3:12b manifest in a model folder. Returns
+    (digests, error): digests is a list of (digest, expected_size) for
+    the config and every layer, error is None on success or a plain
+    reason the manifest could not be read."""
     manifest = os.path.join(
         models_dir, "manifests", "registry.ollama.ai",
         "library", "gemma3", "12b")
     try:
         with open(manifest, encoding="utf-8") as f:
             data = json.load(f)
-    except Exception:
-        return False
+    except Exception as e:
+        return None, "manifest unreadable (%s)" % e
     digests = []
     try:
-        cfg = data.get("config", {}).get("digest", "")
-        if cfg:
-            digests.append(cfg)
+        cfg = data.get("config", {})
+        if cfg.get("digest"):
+            digests.append((cfg["digest"], int(cfg.get("size", 0))))
         for layer in data.get("layers", []):
-            d = layer.get("digest", "")
-            if d:
-                digests.append(d)
-    except Exception:
-        return False
+            if layer.get("digest"):
+                digests.append((layer["digest"], int(layer.get("size", 0))))
+    except Exception as e:
+        return None, "manifest unreadable (%s)" % e
     if not digests:
-        return False
-    for d in digests:
-        name = d.split(":", 1)[-1]
-        blob = os.path.join(models_dir, "blobs", "sha256-" + name)
-        if not os.path.isfile(blob):
-            return False
-    return True
+        return None, "manifest names no blobs"
+    return digests, None
 
 
-def _find_model_dir():
-    """Find the model folder on disk that actually holds gemma3:12b
-    (manifest AND its blobs). Checks the env OLLAMA_MODELS first, then
-    D:, then C:. Returns the folder, or None if no folder has it.
-    This is the scan that replaces the download: the model is already
-    on this PC, the serving Ollama just cannot see it, so find it
-    instead of fetching it again."""
+def _verify_blob(models_dir, digest, expected_size):
+    """Verify ONE blob: it must exist, its size must match the manifest,
+    and its SHA-256 must match its digest. Returns (ok, detail) - the
+    detail names the exact failure (missing, wrong size, wrong hash)."""
+    name = digest.split(":", 1)[-1]
+    blob = os.path.join(models_dir, "blobs", "sha256-" + name)
+    try:
+        actual_size = os.path.getsize(blob)
+    except OSError:
+        return False, "blob %s is missing" % digest
+    if actual_size != expected_size:
+        return False, ("blob %s is %d bytes, manifest says %d "
+                       "(truncated or wrong file)" % (digest, actual_size, expected_size))
+    h = hashlib.sha256()
+    try:
+        with open(blob, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+    except OSError as e:
+        return False, "blob %s unreadable (%s)" % (digest, e)
+    if h.hexdigest() != name:
+        return False, ("blob %s hashes to %s, not its digest "
+                       "(corrupt copy)" % (digest, h.hexdigest()))
+    return True, "ok"
+
+
+def _verify_model_dir(models_dir):
+    """Strict check of one model folder: the manifest must read AND
+    EVERY blob it names must exist, match its size, and match its
+    SHA-256. A half-moved or truncated copy fails here - Ollama would
+    reject it too, so the folder does not count. Returns (ok, failures):
+    failures is a list of plain reasons, empty when the folder is good.
+    Results are cached per folder fingerprint (manifest + blob sizes
+    and mtimes), so an 8 GB hash is not redone on every Send."""
+    digests, err = _manifest_digests(models_dir)
+    if err:
+        return False, ["manifest: " + err]
+    try:
+        manifest = os.path.join(
+            models_dir, "manifests", "registry.ollama.ai",
+            "library", "gemma3", "12b")
+        st = os.stat(manifest)
+        fingerprint = [st.st_size, st.st_mtime_ns]
+        for digest, _size in digests:
+            name = digest.split(":", 1)[-1]
+            blob = os.path.join(models_dir, "blobs", "sha256-" + name)
+            try:
+                bst = os.stat(blob)
+                fingerprint.append((bst.st_size, bst.st_mtime_ns))
+            except OSError:
+                fingerprint.append(None)
+        key = (models_dir, tuple(fingerprint))
+    except Exception:
+        key = None
+    if key is not None and key in _VERIFY_CACHE:
+        return _VERIFY_CACHE[key]
+    failures = []
+    for digest, size in digests:
+        ok, detail = _verify_blob(models_dir, digest, size)
+        if not ok:
+            failures.append(detail)
+    result = (not failures, failures)
+    if key is not None:
+        _VERIFY_CACHE[key] = result
+    return result
+
+
+def _scan_model_dirs():
+    """Check every candidate model folder with the strict verifier.
+    Checks the env OLLAMA_MODELS first, then the EMMA_MODEL_DIRS
+    override (os.pathsep-separated, a test hook), then D:, then C:.
+    Returns (found_dir, report): found_dir is the first folder that is
+    complete and verified, or None; report is a list of plain lines
+    naming each folder checked and, for the rejected ones, exactly
+    which blobs failed and why. The report is what the chat error
+    shows when no folder is complete."""
     candidates = []
     env_dir = os.environ.get("OLLAMA_MODELS")
     if env_dir and env_dir not in candidates:
         candidates.append(env_dir)
+    override = os.environ.get("EMMA_MODEL_DIRS")
+    if override:
+        for d in override.split(os.pathsep):
+            if d and d not in candidates:
+                candidates.append(d)
     for d in MODEL_DIRS:
         if d not in candidates:
             candidates.append(d)
+    report = []
     for d in candidates:
-        if _model_in_dir(d):
-            return d
-    return None
+        ok, failures = _verify_model_dir(d)
+        if ok:
+            report.append("%s: complete and verified" % d)
+            return d, report
+        if failures:
+            report.append("%s: %s" % (d, " | ".join(failures)))
+        else:
+            report.append("%s: no complete model here" % d)
+    return None, report
+
+
+def _log_scan_report(report):
+    """Write the folder scan report to the log, so a rejected folder and
+    its exact failing blobs are always visible there."""
+    for line in report:
+        if "complete and verified" in line:
+            _log("Model folder: " + line)
+        else:
+            _log("Model folder rejected: " + line)
+
+
+def _model_in_dir(models_dir):
+    """True if the given model folder holds a COMPLETE, VERIFIED
+    gemma3:12b: the manifest AND every blob it names, each blob's size
+    matching the manifest and its SHA-256 matching its digest. Ollama
+    keeps one manifest per model under manifests/registry.ollama.ai/
+    library/<name>/<tag>, and the blobs under blobs/sha256-<hex>.
+    A manifest with missing, truncated, or corrupt blobs is not a
+    model - it is a half-moved or half-downloaded one, and restarting
+    from that folder buys nothing, so it counts as not found."""
+    ok, _failures = _verify_model_dir(models_dir)
+    return ok
+
+
+def _find_model_dir():
+    """Find the model folder on disk that actually holds a complete,
+    verified gemma3:12b. Returns the folder, or None. Kept for the
+    /api/status route; the heal uses _scan_model_dirs so it can name
+    the exact failures when no folder is complete."""
+    found, _report = _scan_model_dirs()
+    return found
 
 
 def _stop_ollama():
-    """Stop the Ollama on 11434, hidden, then VERIFY the port is free.
-    No console shell anywhere: if this server started Ollama itself it
-    ends its own child process directly; otherwise it asks Windows to
-    end ollama.exe with taskkill, run with CREATE_NO_WINDOW so no
-    console window ever flashes. Returns True only if the port is free."""
+    """Stop the Ollama on 11434 and PROVE the port is free. Kills ALL
+    ollama.exe processes (hidden taskkill /F /IM ollama.exe), not just
+    this server's own child and not just the port listener - a stale
+    Ollama from an earlier boot holds the port and a new one cannot
+    bind while it lives. Then polls until port 11434 is actually free
+    (up to 15s) and logs whether it freed. Returns (ok, detail): ok is
+    True only when the port is free; detail names the owning PID and
+    image when it never freed, so the failure is never mistaken for a
+    successful restart."""
     global _OLLAMA_PROC
     proc = _OLLAMA_PROC
     _OLLAMA_PROC = None
@@ -264,39 +564,36 @@ def _stop_ollama():
                 proc.kill()
             except Exception:
                 pass
-    elif _port_free(11434):
-        return True
-    else:
-        # Ollama is running but this server did not start it (Willow's,
-        # or one from an earlier boot). End it by name, hidden.
-        try:
-            subprocess.run(
-                ["taskkill", "/F", "/IM", "ollama.exe"],
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                timeout=20)
-        except FileNotFoundError:
-            _log("taskkill not found; cannot stop the Ollama this server did not start.")
-            return _port_free(11434)
-        except Exception as e:
-            _log(f"Could not ask Ollama to stop ({e}).")
-            return False
-    for _ in range(10):
+    killed, detail = _kill_ollama_processes()
+    if killed:
+        _log("Stopped Ollama: " + detail)
+    for _ in range(15):
         if _port_free(11434):
             _log("Old Ollama stopped; port 11434 is free.")
-            return True
+            return True, "port 11434 is free"
         time.sleep(1)
-    _log("Old Ollama would not release port 11434 after 10s.")
-    return False
+    owner = _port_owner_pid(11434)
+    image = _pid_image_name(owner) if owner else None
+    if owner:
+        msg = ("port 11434 is still held by PID %d%s after killing ollama.exe"
+               % (owner, (" (" + image + ")") if image else ""))
+    else:
+        msg = "port 11434 never freed and its owner could not be determined"
+    _log("Old Ollama would not release port 11434. " + msg + ".")
+    return False, msg
 
 
 def _start_ollama(models_dir):
-    """Start ollama serve from the given model folder and VERIFY it
-    actually answers. Hidden: CREATE_NO_WINDOW, so no console window
-    ever flashes. The child's stderr goes to phi-emma-local.log (never
-    to pythonw's None streams), so a real failure is visible. The
-    process is kept in _OLLAMA_PROC so _stop_ollama can end it
-    directly later. Returns True only if the new server answers."""
+    """Start ollama serve from the given model folder and PROVE the new
+    server took over: the child must stay alive AND port 11434 must be
+    owned by that child's PID (when the owner can be determined). The
+    old code returned True as soon as ANY server answered on 11434 -
+    including the stale one that never died - so a restart that never
+    took over looked like a success. Hidden: CREATE_NO_WINDOW, so no
+    console window ever flashes. The child's stderr goes to
+    phi-emma-local.log (never to pythonw's None streams), so a real
+    failure is visible. The process is kept in _OLLAMA_PROC so
+    _stop_ollama can end it directly later. Returns (ok, detail)."""
     global _OLLAMA_MISSING, _OLLAMA_PROC
     try:
         err = open(LOG_FILE, "ab")
@@ -314,14 +611,14 @@ def _start_ollama(models_dir):
             err.close()
         except Exception:
             pass
-        return False
+        return False, "the ollama command was not found on PATH"
     except Exception as e:
         _log(f"Could not start Ollama ({e}).")
         try:
             err.close()
         except Exception:
             pass
-        return False
+        return False, "could not start Ollama (%s)" % e
     try:
         err.close()
     except Exception:
@@ -331,10 +628,28 @@ def _start_ollama(models_dir):
         if proc.poll() is not None:
             _log(f"Ollama serve exited at once (code {proc.returncode}). "
                  "See the tail of phi-emma-local.log for its own error.")
-            return False
+            return False, "Ollama serve exited at once (code %s)" % proc.returncode
         if _ollama_up(timeout=2):
+            owner = _port_owner_pid(11434)
+            if owner is not None and owner != proc.pid:
+                image = _pid_image_name(owner)
+                _log(f"Port 11434 is owned by PID {owner}"
+                     + (f" ({image})" if image else "")
+                     + f", not the Ollama just started (PID {proc.pid}). "
+                     "The old server never died; stopping the new one.")
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=5)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                return False, ("port 11434 is owned by PID %d%s, not the "
+                               "Ollama just started (PID %d)"
+                               % (owner, (" (" + image + ")") if image else "", proc.pid))
             _log(f"Ollama is up from {models_dir}.")
-            return True
+            return True, "Ollama is up from %s" % models_dir
         time.sleep(1)
     _log("Ollama started but is not answering after 20s; stopping it.")
     try:
@@ -345,7 +660,7 @@ def _start_ollama(models_dir):
             proc.kill()
         except Exception:
             pass
-    return False
+    return False, "Ollama started but is not answering after 20s"
 
 
 def _wait_ollama_model(timeout=30):
@@ -361,15 +676,20 @@ def _wait_ollama_model(timeout=30):
 
 def _restart_ollama(models_dir):
     """Stop the old Ollama and start a fresh one from the given model
-    folder, verifying both steps. Returns True only if a new server is
-    answering. Records the restart so the same folder is not retried
-    for a while when it did not help."""
+    folder, proving both steps. Returns (ok, detail). The restart is
+    only recorded as done when the new Ollama actually took over, so a
+    failed takeover is NOT cooled down - the next Send can try again
+    instead of reporting a stale success."""
     global _LAST_RESTART_DIR, _LAST_RESTART_AT
+    ok, detail = _stop_ollama()
+    if not ok:
+        return False, detail
+    ok, detail = _start_ollama(models_dir)
+    if not ok:
+        return False, detail
     _LAST_RESTART_DIR = models_dir
     _LAST_RESTART_AT = time.time()
-    if not _stop_ollama():
-        return False
-    return _start_ollama(models_dir)
+    return True, detail
 
 
 _ENSURE_LOCK = threading.Lock()
@@ -383,19 +703,28 @@ def _ensure_ollama():
     The model is already on this PC; the serving Ollama just cannot see
     it, because it was started pointing at a folder that does not hold
     it. So this heal FINDS the model on disk instead of downloading it
-    again. There is no download anywhere in this file.
+    again. There is no download anywhere in this file. The scan
+    verifies EVERY blob (size and SHA-256), so a truncated copy is
+    rejected and named, never restarted from.
     - Ollama up and the model in it: nothing to do.
-    - Ollama up but the model missing: scan D: then C: for the model.
-      If a folder has it, restart Ollama ONCE from that folder. If no
-      folder has it, say so plainly and stop - a restart buys nothing
+    - Ollama up but the model missing: scan the folders for a complete,
+      verified copy. If a folder has it, restart Ollama ONCE from that
+      folder - and PROVE the restart took over (the port must free, the
+      new server must own it, and the model must list). If the port
+      never frees, or the model still is not listed after a verified
+      restart, say exactly which step failed - do not pretend the
+      restart worked. If no folder has a complete copy, say so plainly
+      (which folders, which blobs) and stop - a restart buys nothing
       and a download is never attempted.
     - Ollama down: start it hidden, pointing at the folder the scan
       found (or D: by default). One Ollama only.
     A restart is never repeated for the same folder within five minutes
-    when it did not help, and a "not on disk" verdict is not rescanned
-    for a minute - so pressing Send cannot restart Ollama over and over.
-    Never fatal and never blocks the server from answering: the page
-    answers from second zero and the chat route reports the true state."""
+    when it actually took over and still did not help, and a "not on
+    disk" verdict is not rescanned for a minute - so pressing Send
+    cannot restart Ollama over and over. A FAILED takeover is not
+    cooled down: the next Send can try again. Never fatal and never
+    blocks the server from answering: the page answers from second zero
+    and the chat route reports the true state."""
     global _LAST_HEAL_ERROR, _LAST_HEAL_AT, _LAST_HEAL_RESULT
     with _ENSURE_LOCK:
         now = time.time()
@@ -410,11 +739,12 @@ def _ensure_ollama():
         _LAST_HEAL_AT = now
         _LAST_HEAL_ERROR = None
         if _ollama_up(timeout=2):
-            found = _find_model_dir()
+            found, report = _scan_model_dirs()
+            _log_scan_report(report)
             if found is None:
                 _LAST_HEAL_ERROR = (
-                    "gemma3:12b was not found in D:\\PhiMove\\.ollama\\models "
-                    "or C:\\Users\\Admin\\.ollama\\models. I never download.")
+                    "gemma3:12b is not complete in either model folder. "
+                    + " | ".join(report) + ". I never download.")
                 _LAST_HEAL_RESULT = "no_model_on_disk"
                 _log("Ollama is up but gemma3:12b is not in it, and the model "
                      "is in neither model folder on disk. Not restarting, "
@@ -428,29 +758,31 @@ def _ensure_ollama():
                 return False
             _log("Ollama is up but gemma3:12b is not in it. The model is on "
                  "disk at " + found + ". Restarting Ollama from there.")
-            if _restart_ollama(found) and _wait_ollama_model(30):
+            ok, detail = _restart_ollama(found)
+            if not ok:
+                _LAST_HEAL_ERROR = "Ollama could not be restarted: " + detail
+                _LAST_HEAL_RESULT = "start_failed"
+                _log("The restart did not take over: " + detail)
+                return False
+            if _wait_ollama_model(30):
                 _LAST_HEAL_RESULT = "ready"
                 _log("Ollama is up from the folder that holds gemma3:12b.")
                 return True
-            _log("gemma3:12b is still missing after the restart.")
-            if not _ollama_up(timeout=2):
-                _log("The restart left Ollama down; starting one again.")
-                if _start_ollama(found) and _wait_ollama_model(30):
-                    _LAST_HEAL_RESULT = "ready"
-                    return True
-                _LAST_HEAL_ERROR = "Ollama is not running and could not be started."
-                _LAST_HEAL_RESULT = "start_failed"
-                return False
             _LAST_HEAL_ERROR = (
-                "Ollama was restarted from the folder that holds gemma3:12b "
-                "and the model still is not in it.")
+                "Ollama was restarted from " + found +
+                " and the model still is not in it, even though the folder "
+                "was verified complete and the new Ollama owns port 11434.")
             _LAST_HEAL_RESULT = "restart_no_help"
+            _log("gemma3:12b is still missing after a verified restart from "
+                 + found + ".")
             return False
-        found = _find_model_dir()
+        found, report = _scan_model_dirs()
+        _log_scan_report(report)
         models_dir = found or OLLAMA_MODELS_DIR
         _log("Ollama is not answering. Starting it from " + models_dir + ".")
-        if not _start_ollama(models_dir):
-            _LAST_HEAL_ERROR = "Ollama is not running and could not be started."
+        ok, detail = _start_ollama(models_dir)
+        if not ok:
+            _LAST_HEAL_ERROR = "Ollama is not running and could not be started: " + detail
             _LAST_HEAL_RESULT = "start_failed"
             return False
         if _wait_ollama_model(30):
@@ -459,13 +791,14 @@ def _ensure_ollama():
             return True
         if found is None:
             _LAST_HEAL_ERROR = (
-                "gemma3:12b was not found in D:\\PhiMove\\.ollama\\models "
-                "or C:\\Users\\Admin\\.ollama\\models. I never download.")
+                "gemma3:12b is not complete in either model folder. "
+                + " | ".join(report) + ". I never download.")
             _LAST_HEAL_RESULT = "no_model_on_disk"
         else:
             _LAST_HEAL_ERROR = (
                 "Ollama was started from " + found +
-                " and gemma3:12b still is not in it.")
+                " and gemma3:12b still is not in it, even though the folder "
+                "was verified complete.")
             _LAST_HEAL_RESULT = "restart_no_help"
         return False
 
