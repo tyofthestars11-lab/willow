@@ -19,6 +19,21 @@ package Willow already uses on this PC - no new install. If Kokoro is not
 there, the server still works; the page speaks with the browser instead.
 All files are resolved from this script's own folder, so it works from any
 working directory.
+
+Logging: this server runs under pythonw (no console), where sys.stdout and
+sys.stderr are None. The first build wrote its request log straight to
+sys.stderr, so EVERY request crashed before answering - the server listened
+fine but could never reply, which is exactly the flash failure ("The
+underlying connection was closed"). So NOTHING here writes to stdout or
+stderr. Everything goes to phi-emma-local.log next to this file, and the
+flash prints its tail when a check fails.
+
+Self-heal: the brain check is Ollama up AND gemma3:12b present. If Ollama
+is up but the model is missing (a stale Ollama pointed at the wrong folder),
+the server restarts Ollama from the D: model folder. If the model is still
+missing, it downloads gemma3:12b in the background and the chat route says
+so plainly until it arrives. The server stays up and answering the whole
+time - a missing brain never takes the page down.
 """
 import io
 import json
@@ -27,6 +42,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -37,6 +53,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROMPT_FILE = os.path.join(BASE_DIR, "phi-emma-system-prompt.md")
 TALK_FILE = os.path.join(BASE_DIR, "phi-emma-local-talk.html")
 PID_FILE = os.path.join(BASE_DIR, "phi-emma-local-server.pid")
+LOG_FILE = os.path.join(BASE_DIR, "phi-emma-local.log")
 
 HOST = "127.0.0.1"
 PORT = 1620
@@ -50,6 +67,7 @@ FALLBACK_VOICE = "af_heart"  # Willow's voice, if af_bella is not in the pack
 MAX_HISTORY_MESSAGES = 16   # last 8 turns, so the context stays bounded
 MAX_MESSAGE_CHARS = 2000
 MAX_SPEAK_CHARS = 600
+OLLAMA_MODELS_DIR = r"D:\PhiMove\.ollama\models"
 
 FALLBACK_PROMPT = (
     "You are Emma, the phi version. You speak to Tyree in short spoken turns. "
@@ -59,6 +77,19 @@ FALLBACK_PROMPT = (
 )
 
 
+def _log(msg):
+    """Append one timestamped line to phi-emma-local.log. Never raises and
+    never touches stdout/stderr: under pythonw both are None, and writing
+    to them crashes the request handler before it can answer. Logging must
+    never crash a request."""
+    try:
+        line = time.strftime("%Y-%m-%d %H:%M:%S") + " " + str(msg) + "\n"
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass
+
+
 def _load_prompt():
     try:
         with open(PROMPT_FILE, encoding="utf-8") as f:
@@ -66,7 +97,7 @@ def _load_prompt():
         if text:
             return text
     except Exception as e:
-        print(f"prompt file not loaded ({e}); using the short fallback.", flush=True)
+        _log(f"prompt file not loaded ({e}); using the short fallback.")
     return FALLBACK_PROMPT
 
 
@@ -96,30 +127,118 @@ def _model_present(timeout=3):
     return False
 
 
-def _ensure_ollama():
-    """Make sure a local Ollama is answering. If none is, start one from
-    the D: model folder, the same place Willow's brain lives. Never fatal:
-    if it cannot be started, the chat route says so plainly."""
-    if _ollama_up():
-        return True
+def _ollama_env():
     env = dict(os.environ)
-    env["OLLAMA_MODELS"] = r"D:\PhiMove\.ollama\models"
+    env["OLLAMA_MODELS"] = OLLAMA_MODELS_DIR
     env["OLLAMA_KEEP_ALIVE"] = "-1"
+    return env
+
+
+def _stop_ollama():
+    """Stop whatever holds port 11434 (Windows PowerShell). Best effort."""
+    try:
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "$c = Get-NetTCPConnection -LocalPort 11434 -State Listen "
+             "-ErrorAction SilentlyContinue | Select-Object -First 1; "
+             "if ($c) { Stop-Process -Id $c.OwningProcess -Force "
+             "-ErrorAction SilentlyContinue }"],
+            capture_output=True, timeout=20)
+    except Exception as e:
+        _log(f"Could not stop the old Ollama ({e}).")
+
+
+def _start_ollama():
+    """Start ollama serve from the D: model folder. Best effort."""
     try:
         subprocess.Popen(
-            ["ollama", "serve"], env=env,
+            ["ollama", "serve"], env=_ollama_env(),
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        print("Ollama was not answering; started it from D:\\PhiMove\\.ollama\\models.", flush=True)
+        _log("Started Ollama from D:\\PhiMove\\.ollama\\models.")
+        return True
     except Exception as e:
-        print(f"Could not start Ollama ({e}). Chat will say so plainly.", flush=True)
+        _log(f"Could not start Ollama ({e}).")
         return False
-    for _ in range(30):
-        time.sleep(1)
-        if _ollama_up():
+
+
+def _wait_ollama_model(timeout=30):
+    for _ in range(timeout):
+        if _ollama_up() and _model_present():
             return True
-    print("Ollama did not come up in 30s. Chat will say so plainly.", flush=True)
-    return False
+        time.sleep(1)
+    return _ollama_up() and _model_present()
+
+
+_PULLING = False
+_PULL_LOCK = threading.Lock()
+_ENSURE_LOCK = threading.Lock()
+
+
+def _pull_model():
+    """Download the brain in the background. Runs in a daemon thread so
+    the server stays up and answering while the model arrives."""
+    global _PULLING
+    _log(f"Downloading {MODEL} into Ollama (this can take a few minutes) ...")
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as lf:
+            proc = subprocess.run(
+                ["ollama", "pull", MODEL], env=_ollama_env(),
+                stdout=lf, stderr=subprocess.STDOUT, timeout=1800)
+        if proc.returncode == 0 and _model_present():
+            _log(f"{MODEL} downloaded. Her brain is back.")
+        else:
+            _log(f"{MODEL} download failed (exit {proc.returncode}).")
+    except Exception as e:
+        _log(f"{MODEL} download failed ({e}).")
+    finally:
+        with _PULL_LOCK:
+            _PULLING = False
+
+
+def _start_pull():
+    global _PULLING
+    with _PULL_LOCK:
+        if _PULLING:
+            return False
+        _PULLING = True
+    threading.Thread(target=_pull_model, daemon=True).start()
+    return True
+
+
+def _ensure_ollama():
+    """Make sure a local Ollama is answering AND has gemma3:12b.
+    Self-heals: if Ollama is up but the model is missing (a stale Ollama
+    pointed at the wrong folder), restart Ollama from the D: folder. If the
+    model is still missing, download it in the background. Never fatal and
+    never blocks the server from answering: while the brain is downloading,
+    the chat route says so plainly."""
+    with _ENSURE_LOCK:
+        if _ollama_up() and _model_present():
+            return True
+        if _ollama_up():
+            # Up, but the brain is not in this instance's store.
+            _log("Ollama is up but gemma3:12b is not in it. "
+                 "Restarting Ollama from D:\\PhiMove\\.ollama\\models.")
+            _stop_ollama()
+            time.sleep(2)
+            _start_ollama()
+            if _wait_ollama_model(30):
+                _log("Ollama is up from D: and gemma3:12b is present.")
+                return True
+            _log("gemma3:12b is still missing after the restart from D:.")
+        else:
+            _log("Ollama is not answering. Starting it from "
+                 "D:\\PhiMove\\.ollama\\models.")
+            _start_ollama()
+            if _wait_ollama_model(30):
+                _log("Ollama is up from D: and gemma3:12b is present.")
+                return True
+            _log("Ollama did not come up with gemma3:12b in 30s.")
+        if _start_pull():
+            _log("Her brain is downloading in the background. "
+                 "Chat will say so until it arrives.")
+        return False
 
 
 def _ollama_chat(messages, num_predict=377):
@@ -212,14 +331,14 @@ def _load_kokoro():
         _KOKORO_TRIED = True
         onnx, voices = _kokoro_paths()
         if not onnx:
-            print("Kokoro model files not found; voice falls back to the browser.", flush=True)
+            _log("Kokoro model files not found; voice falls back to the browser.")
             return None
         try:
             from kokoro_onnx import Kokoro
             _KOKORO = Kokoro(onnx, voices)
-            print(f"Kokoro voice loaded ({EMMA_VOICE}).", flush=True)
+            _log(f"Kokoro voice loaded ({EMMA_VOICE}).")
         except Exception as e:
-            print(f"Kokoro voice not loaded ({e}); voice falls back to the browser.", flush=True)
+            _log(f"Kokoro voice not loaded ({e}); voice falls back to the browser.")
             _KOKORO = None
         return _KOKORO
 
@@ -273,7 +392,13 @@ def _kokoro_speak(text):
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
-        sys.stderr.write("Emma local: %s\n" % (fmt % args))
+        _log("Emma local: %s" % (fmt % args))
+
+    def handle_error(self, request, client_address):
+        try:
+            _log("Request error:\n" + traceback.format_exc())
+        except Exception:
+            pass
 
     def _send_json(self, status, obj):
         body = json.dumps(obj).encode()
@@ -364,7 +489,12 @@ class Handler(BaseHTTPRequestHandler):
         messages = ([{"role": "system", "content": SYSTEM_PROMPT}]
                     + clean_history
                     + [{"role": "user", "content": message}])
-        _ensure_ollama()
+        if not _ensure_ollama():
+            if _PULLING:
+                self._send_json(503, {"error": "Her brain (gemma3:12b) is still downloading into Ollama. Give it a few minutes, then Send again."})
+            else:
+                self._send_json(503, {"error": "Her brain (Ollama gemma3:12b) is not answering. Start Ollama and Send again."})
+            return
         try:
             reply = _ollama_chat(messages, num_predict=body.get("num_predict", 377))
         except RuntimeError as e:
@@ -379,15 +509,18 @@ def main():
             f.write(str(os.getpid()))
     except Exception:
         pass
-    _ensure_ollama()
-    print(f"Phi Emma (local) serving {BASE_DIR}", flush=True)
-    print(f"Open http://{HOST}:{PORT} - no Nuance, no credits, no key.", flush=True)
-    print(f"Brain: local Ollama {MODEL}. Voice: Kokoro {EMMA_VOICE} (browser fallback).", flush=True)
-    server = ThreadingHTTPServer((HOST, PORT), Handler)
     try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
+        _ensure_ollama()
+        _log(f"Phi Emma (local) serving {BASE_DIR}")
+        _log(f"Open http://{HOST}:{PORT} - no Nuance, no credits, no key.")
+        _log(f"Brain: local Ollama {MODEL}. Voice: Kokoro {EMMA_VOICE} (browser fallback).")
+        server = ThreadingHTTPServer((HOST, PORT), Handler)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+    except Exception:
+        _log("Phi Emma (local) failed to start:\n" + traceback.format_exc())
 
 
 if __name__ == "__main__":

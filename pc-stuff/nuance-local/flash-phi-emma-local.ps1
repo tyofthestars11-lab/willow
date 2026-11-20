@@ -95,25 +95,43 @@ Start-Process "$Live\start-phi-emma-local.bat"
 Start-Sleep -Seconds 3
 
 # 7. Quick check that she answers - BOTH the page and a real chat turn.
+# The page is retried: the server can take a moment to bind after starting.
 # The chat check uses a tiny reply (num_predict 8) so it is fast even on
 # this PC, but it is a real call to the local brain, not a fake ping.
+# The chat is retried too: her brain may still be downloading on the first
+# try, and the retry gives it time to arrive.
 $PageOk = $false
 $ChatOk = $false
 $ChatErr = ""
-try {
-    $r = Invoke-WebRequest -Uri 'http://127.0.0.1:1620/' -UseBasicParsing -TimeoutSec 5
-    if ($r.StatusCode -eq 200) { $PageOk = $true }
-} catch { }
-try {
-    $r = Invoke-WebRequest -Uri 'http://127.0.0.1:1620/api/chat' -Method POST -Body '{"message": "Say hi in one word.", "num_predict": 8}' -ContentType 'application/json' -UseBasicParsing -TimeoutSec 180
-    if ($r.StatusCode -eq 200) { $ChatOk = $true } else { $ChatErr = "HTTP $($r.StatusCode)" }
-} catch {
-    $ChatErr = $_.Exception.Message
+for ($i = 0; $i -lt 15; $i++) {
+    try {
+        $r = Invoke-WebRequest -Uri 'http://127.0.0.1:1620/' -UseBasicParsing -TimeoutSec 5
+        if ($r.StatusCode -eq 200) { $PageOk = $true; break }
+    } catch { }
+    Start-Sleep -Seconds 2
+}
+for ($i = 0; $i -lt 3; $i++) {
+    try {
+        $r = Invoke-WebRequest -Uri 'http://127.0.0.1:1620/api/chat' -Method POST -Body '{"message": "Say hi in one word.", "num_predict": 8}' -ContentType 'application/json' -UseBasicParsing -TimeoutSec 180
+        if ($r.StatusCode -eq 200) { $ChatOk = $true; break }
+        $ChatErr = "HTTP $($r.StatusCode)"
+    } catch {
+        $ChatErr = $_.Exception.Message
+    }
+    if (-not $ChatOk) { Start-Sleep -Seconds 5 }
 }
 if ($PageOk -and $ChatOk) {
     Write-Host "Phi Emma (local) is live at http://127.0.0.1:1620 - open it and talk to her. No Nuance, no credits, no key."
 } else {
     Write-Host "FAILED: Phi Emma (local) did not come up clean. Page OK: $PageOk. Chat OK: $ChatOk. $ChatErr"
+    $LogFile = Join-Path $Live 'phi-emma-local.log'
+    if (Test-Path $LogFile) {
+        Write-Host "--- last lines of phi-emma-local.log ---"
+        Get-Content $LogFile -Tail 15 | ForEach-Object { Write-Host $_ }
+        Write-Host "--- end of log ---"
+    } else {
+        Write-Host "No log file yet - the server never started far enough to write one."
+    }
     Write-Host "If the chat is not OK, her brain (Ollama gemma3:12b) is not answering - start Ollama and run this flash again."
     exit 1
 }
