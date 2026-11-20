@@ -25,6 +25,7 @@
     border: 1px solid #6b5320; border-radius: 16px; overflow: hidden;
     background: #171204; box-shadow: 0 0 40px rgba(233,185,73,.12);
   }
+  .video-wrap { position: relative; }
   video {
     display: block; width: 100%; aspect-ratio: 16/9; background: #171204;
     object-fit: cover;
@@ -79,11 +80,13 @@
 </header>
 <main>
   <div class="stage">
-    <video id="avatarVideo" autoplay playsinline muted></video>
-    <div class="video-placeholder" id="videoPlaceholder">
-      <div class="phi-mark">&phi;</div>
-      <div class="name">EMMA</div>
-      <div class="joining" id="placeholderStatus">Press Start to talk to her.</div>
+    <div class="video-wrap">
+      <video id="avatarVideo" autoplay playsinline muted></video>
+      <div class="video-placeholder" id="videoPlaceholder">
+        <div class="phi-mark">&phi;</div>
+        <div class="name">EMMA</div>
+        <div class="joining" id="placeholderStatus">Press Start to talk to her.</div>
+      </div>
     </div>
     <audio id="avatarAudio" autoplay></audio>
     <div class="controls">
