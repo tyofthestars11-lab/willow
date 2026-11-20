@@ -4,7 +4,9 @@
 She runs on the same local stack as Willow: local Ollama (gemma3:12b) for
 the brain, local Kokoro for the voice, her own merged phi prompt for who
 she is. Serves 127.0.0.1:1620. Willow is 1618, Nuance Emma is 1619, local
-Emma is 1620 - three doors, no collisions.
+Emma is 1620 - three doors, no collisions. Willow and Emma share ONE
+brain: the same gemma3:12b on the same Ollama on 11434. There is only
+ever one Ollama, and this server never starts a second one.
 
 Routes:
   GET  /              the talk page
@@ -28,14 +30,23 @@ underlying connection was closed"). So NOTHING here writes to stdout or
 stderr. Everything goes to phi-emma-local.log next to this file, and the
 flash prints its tail when a check fails.
 
-Self-heal: the brain check is Ollama up AND gemma3:12b present. If Ollama
-is up but the model is missing (a stale Ollama pointed at the wrong folder),
-the server restarts Ollama from the D: model folder. If the model is still
-missing, it downloads gemma3:12b in the background and the chat route says
-so plainly until it arrives. The server binds port 1620 FIRST and heals
-the brain in a background thread, so the page answers from second zero
-even while the heal is still running - a missing brain never takes the
-page down, and never delays it either.
+The brain: the model is already on this PC. The serving Ollama just
+cannot see it, because it was started pointing at a folder that does
+not hold it - so `ollama list` looks empty and the model looks missing.
+This server FINDS the model on disk instead of downloading it again:
+it scans D:\\PhiMove\\.ollama\\models then C:\\Users\\Admin\\.ollama\\models
+for the gemma3:12b manifest and its blobs. If a folder has it, Ollama
+is restarted ONCE from that folder and the brain appears. If no folder
+has it, the server says so plainly and stops - it never downloads.
+There is no download anywhere in this file.
+
+No console shell anywhere in this file either. Ollama is started and
+stopped with hidden Python subprocesses (CREATE_NO_WINDOW), so no
+console window ever flashes when the page loads or when Tyree presses
+Send. The server binds port 1620 FIRST and heals the brain in a
+background thread, so the page answers from second zero even while
+the heal is still running - a missing brain never takes the page down,
+and never delays it either.
 """
 import io
 import json
@@ -71,13 +82,34 @@ MAX_HISTORY_MESSAGES = 16   # last 8 turns, so the context stays bounded
 MAX_MESSAGE_CHARS = 2000
 MAX_SPEAK_CHARS = 600
 OLLAMA_MODELS_DIR = r"D:\PhiMove\.ollama\models"
+OLLAMA_MODELS_C_DIR = r"C:\Users\Admin\.ollama\models"
+# The model folders on this PC, in the order they are checked. D: is the
+# configured OLLAMA_MODELS and is checked first; C: is the stale copy
+# from before the move.
+MODEL_DIRS = [OLLAMA_MODELS_DIR, OLLAMA_MODELS_C_DIR]
 
 # Heal state. _OLLAMA_MISSING means the ollama command itself was not
 # found on PATH, so the server cannot start what is not installed.
 # _LAST_HEAL_ERROR holds the plain reason the last heal failed, or None;
 # the chat route uses it to name the true state instead of guessing.
+# _LAST_HEAL_AT / _LAST_HEAL_RESULT give the heal a short memory so a
+# Send cannot make it redo expensive work (restart Ollama, rescan)
+# over and over: if the last heal already concluded the model is not
+# on disk, the next Sends just report that state until the cooldown
+# passes. _LAST_RESTART_DIR / _LAST_RESTART_AT remember the last
+# restart, so the server never restarts Ollama from the same folder
+# twice in a row when it did not help. _OLLAMA_PROC is the Ollama
+# process this server started itself, so it can be ended directly.
 _OLLAMA_MISSING = False
 _LAST_HEAL_ERROR = None
+_LAST_HEAL_AT = 0.0
+_LAST_HEAL_RESULT = None
+_LAST_RESTART_DIR = None
+_LAST_RESTART_AT = 0.0
+_OLLAMA_PROC = None
+_HEAL_COOLDOWN_NO_MODEL = 60.0
+_HEAL_COOLDOWN_START_FAILED = 15.0
+_RESTART_COOLDOWN = 300.0
 
 FALLBACK_PROMPT = (
     "You are Emma, the phi version. You speak to Tyree in short spoken turns. "
@@ -137,9 +169,9 @@ def _model_present(timeout=3):
     return False
 
 
-def _ollama_env():
+def _ollama_env(models_dir):
     env = dict(os.environ)
-    env["OLLAMA_MODELS"] = OLLAMA_MODELS_DIR
+    env["OLLAMA_MODELS"] = models_dir
     env["OLLAMA_KEEP_ALIVE"] = "-1"
     return env
 
@@ -157,25 +189,98 @@ def _port_free(port):
         return False
 
 
-def _stop_ollama():
-    """Stop whatever holds port 11434 (Windows PowerShell), then VERIFY
-    the port is actually free. Never stops Ollama while a model download
-    is in progress - killing the server mid-pull is what kept the brain
-    from ever arriving. Returns True only if the port is free."""
-    if _pull_running():
-        _log("Will not stop Ollama: a model download is in progress.")
-        return False
+def _model_in_dir(models_dir):
+    """True if the given model folder holds a COMPLETE gemma3:12b:
+    the manifest AND every blob it names (config + layers). Ollama
+    keeps one manifest per model under manifests/registry.ollama.ai/
+    library/<name>/<tag>, and the blobs under blobs/sha256-<hex>.
+    A manifest with missing blobs is not a model - it is a half-moved
+    or half-downloaded one, and restarting from that folder buys
+    nothing, so it counts as not found."""
+    manifest = os.path.join(
+        models_dir, "manifests", "registry.ollama.ai",
+        "library", "gemma3", "12b")
     try:
-        subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             "$c = Get-NetTCPConnection -LocalPort 11434 -State Listen "
-             "-ErrorAction SilentlyContinue | Select-Object -First 1; "
-             "if ($c) { Stop-Process -Id $c.OwningProcess -Force "
-             "-ErrorAction SilentlyContinue }"],
-            capture_output=True, timeout=20)
-    except Exception as e:
-        _log(f"Could not ask Ollama to stop ({e}).")
+        with open(manifest, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
         return False
+    digests = []
+    try:
+        cfg = data.get("config", {}).get("digest", "")
+        if cfg:
+            digests.append(cfg)
+        for layer in data.get("layers", []):
+            d = layer.get("digest", "")
+            if d:
+                digests.append(d)
+    except Exception:
+        return False
+    if not digests:
+        return False
+    for d in digests:
+        name = d.split(":", 1)[-1]
+        blob = os.path.join(models_dir, "blobs", "sha256-" + name)
+        if not os.path.isfile(blob):
+            return False
+    return True
+
+
+def _find_model_dir():
+    """Find the model folder on disk that actually holds gemma3:12b
+    (manifest AND its blobs). Checks the env OLLAMA_MODELS first, then
+    D:, then C:. Returns the folder, or None if no folder has it.
+    This is the scan that replaces the download: the model is already
+    on this PC, the serving Ollama just cannot see it, so find it
+    instead of fetching it again."""
+    candidates = []
+    env_dir = os.environ.get("OLLAMA_MODELS")
+    if env_dir and env_dir not in candidates:
+        candidates.append(env_dir)
+    for d in MODEL_DIRS:
+        if d not in candidates:
+            candidates.append(d)
+    for d in candidates:
+        if _model_in_dir(d):
+            return d
+    return None
+
+
+def _stop_ollama():
+    """Stop the Ollama on 11434, hidden, then VERIFY the port is free.
+    No console shell anywhere: if this server started Ollama itself it
+    ends its own child process directly; otherwise it asks Windows to
+    end ollama.exe with taskkill, run with CREATE_NO_WINDOW so no
+    console window ever flashes. Returns True only if the port is free."""
+    global _OLLAMA_PROC
+    proc = _OLLAMA_PROC
+    _OLLAMA_PROC = None
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    elif _port_free(11434):
+        return True
+    else:
+        # Ollama is running but this server did not start it (Willow's,
+        # or one from an earlier boot). End it by name, hidden.
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/IM", "ollama.exe"],
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=20)
+        except FileNotFoundError:
+            _log("taskkill not found; cannot stop the Ollama this server did not start.")
+            return _port_free(11434)
+        except Exception as e:
+            _log(f"Could not ask Ollama to stop ({e}).")
+            return False
     for _ in range(10):
         if _port_free(11434):
             _log("Old Ollama stopped; port 11434 is free.")
@@ -185,22 +290,21 @@ def _stop_ollama():
     return False
 
 
-def _start_ollama():
-    """Start ollama serve from the D: model folder and VERIFY it actually
-    answers. The old version fired Popen and returned True blindly, so a
-    serve that died on bind (old process still holding the port) or an
-    ollama that is not on PATH looked like a success while nothing
-    answered. The child's stderr goes to phi-emma-local.log (never to
-    pythonw's None streams), so a real failure is visible. Returns True
-    only if the new server answers on 11434."""
-    global _OLLAMA_MISSING
+def _start_ollama(models_dir):
+    """Start ollama serve from the given model folder and VERIFY it
+    actually answers. Hidden: CREATE_NO_WINDOW, so no console window
+    ever flashes. The child's stderr goes to phi-emma-local.log (never
+    to pythonw's None streams), so a real failure is visible. The
+    process is kept in _OLLAMA_PROC so _stop_ollama can end it
+    directly later. Returns True only if the new server answers."""
+    global _OLLAMA_MISSING, _OLLAMA_PROC
     try:
         err = open(LOG_FILE, "ab")
     except Exception:
         err = subprocess.DEVNULL
     try:
         proc = subprocess.Popen(
-            ["ollama", "serve"], env=_ollama_env(),
+            ["ollama", "serve"], env=_ollama_env(models_dir),
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             stdout=subprocess.DEVNULL, stderr=err)
     except FileNotFoundError:
@@ -222,13 +326,14 @@ def _start_ollama():
         err.close()
     except Exception:
         pass
+    _OLLAMA_PROC = proc
     for _ in range(20):
         if proc.poll() is not None:
             _log(f"Ollama serve exited at once (code {proc.returncode}). "
                  "See the tail of phi-emma-local.log for its own error.")
             return False
         if _ollama_up(timeout=2):
-            _log("Ollama is up from D:\\PhiMove\\.ollama\\models.")
+            _log(f"Ollama is up from {models_dir}.")
             return True
         time.sleep(1)
     _log("Ollama started but is not answering after 20s; stopping it.")
@@ -254,144 +359,114 @@ def _wait_ollama_model(timeout=30):
     return _ollama_up(timeout=2) and _model_present(timeout=3)
 
 
-def _model_in_dir():
-    """True if the D: model folder already holds the gemma3:12b manifest.
-    Ollama keeps one manifest per model under manifests/registry.ollama.ai/
-    library/<name>/<tag>. If it is there, a restart from D: brings the
-    brain back at once; if it is not, a restart buys nothing and the
-    model must be downloaded instead."""
-    manifest = os.path.join(
-        OLLAMA_MODELS_DIR, "manifests", "registry.ollama.ai",
-        "library", "gemma3", "12b")
-    try:
-        return os.path.isfile(manifest)
-    except Exception:
-        return False
-
-
-def _restart_ollama():
-    """Stop the old Ollama and start a fresh one from D:, verifying both
-    steps. Returns True only if a new server is answering. Never runs
-    while a download is in progress (see _stop_ollama)."""
+def _restart_ollama(models_dir):
+    """Stop the old Ollama and start a fresh one from the given model
+    folder, verifying both steps. Returns True only if a new server is
+    answering. Records the restart so the same folder is not retried
+    for a while when it did not help."""
+    global _LAST_RESTART_DIR, _LAST_RESTART_AT
+    _LAST_RESTART_DIR = models_dir
+    _LAST_RESTART_AT = time.time()
     if not _stop_ollama():
         return False
-    return _start_ollama()
+    return _start_ollama(models_dir)
 
 
-_PULLING = False
-_PULL_LOCK = threading.Lock()
 _ENSURE_LOCK = threading.Lock()
 
 
-def _pull_running():
-    """True while a model download is in progress. The heal must never
-    touch Ollama while this is true."""
-    with _PULL_LOCK:
-        return _PULLING
-
-
-def _pull_model():
-    """Download the brain in the background. Runs in a daemon thread so
-    the server stays up and answering while the model arrives. The pull
-    talks to the RUNNING Ollama server, so if the server is down it
-    starts one first (verified); a pull against a dead server fails at
-    once, so that case is caught here instead of burning the attempt."""
-    global _PULLING, _LAST_HEAL_ERROR
-    _log(f"Downloading {MODEL} into Ollama (this can take a few minutes) ...")
-    try:
-        if not _ollama_up(timeout=2):
-            if not _start_ollama():
-                _LAST_HEAL_ERROR = "Ollama is not running and could not be started."
-                _log("Cannot download: Ollama is not running and would not start.")
-                return
-        with open(LOG_FILE, "a", encoding="utf-8") as lf:
-            proc = subprocess.run(
-                ["ollama", "pull", MODEL], env=_ollama_env(),
-                stdout=lf, stderr=subprocess.STDOUT, timeout=1800)
-        if proc.returncode == 0 and _model_present():
-            _LAST_HEAL_ERROR = None
-            _log(f"{MODEL} downloaded. Her brain is back.")
-        else:
-            _LAST_HEAL_ERROR = f"the {MODEL} download failed (exit {proc.returncode})."
-            _log(f"{MODEL} download failed (exit {proc.returncode}).")
-    except Exception as e:
-        _LAST_HEAL_ERROR = f"the {MODEL} download failed ({e})."
-        _log(f"{MODEL} download failed ({e}).")
-    finally:
-        with _PULL_LOCK:
-            _PULLING = False
-
-
-def _start_pull():
-    global _PULLING
-    with _PULL_LOCK:
-        if _PULLING:
-            return False
-        _PULLING = True
-    threading.Thread(target=_pull_model, daemon=True).start()
-    return True
-
-
 def _ensure_ollama():
-    """Make sure a local Ollama is answering AND has gemma3:12b.
-    Self-heals, and is safe to run on every chat attempt:
-    - If a download is already in progress, it does NOTHING. Stopping
-      Ollama mid-pull used to kill the server the pull was downloading
-      into, so the brain never arrived and every Send restarted the
-      death loop. A running pull is now sacred.
-    - If Ollama is down, it starts one (verified) instead of assuming
-      the start worked.
-    - If Ollama is up but the model is missing, it restarts from D:
-      ONLY when the D: folder actually holds the model manifest - a
-      restart buys nothing otherwise, and the model is downloaded
-      instead. The restart is verified both ways (port freed, new
-      server answering), so a failed restart cannot leave Ollama dead
-      without a log line saying why.
-    Never fatal and never blocks the server from answering: while the
-    brain is downloading, the chat route says so plainly."""
-    global _LAST_HEAL_ERROR
+    """Make sure the SHARED local Ollama is answering AND has gemma3:12b.
+    Willow and Emma share this one brain on 11434 - there is only ever
+    one Ollama, and this server never starts a second one.
+
+    The model is already on this PC; the serving Ollama just cannot see
+    it, because it was started pointing at a folder that does not hold
+    it. So this heal FINDS the model on disk instead of downloading it
+    again. There is no download anywhere in this file.
+    - Ollama up and the model in it: nothing to do.
+    - Ollama up but the model missing: scan D: then C: for the model.
+      If a folder has it, restart Ollama ONCE from that folder. If no
+      folder has it, say so plainly and stop - a restart buys nothing
+      and a download is never attempted.
+    - Ollama down: start it hidden, pointing at the folder the scan
+      found (or D: by default). One Ollama only.
+    A restart is never repeated for the same folder within five minutes
+    when it did not help, and a "not on disk" verdict is not rescanned
+    for a minute - so pressing Send cannot restart Ollama over and over.
+    Never fatal and never blocks the server from answering: the page
+    answers from second zero and the chat route reports the true state."""
+    global _LAST_HEAL_ERROR, _LAST_HEAL_AT, _LAST_HEAL_RESULT
     with _ENSURE_LOCK:
-        if _pull_running():
-            return False
+        now = time.time()
         if _ollama_up(timeout=2) and _model_present(timeout=3):
             _LAST_HEAL_ERROR = None
+            _LAST_HEAL_RESULT = "ready"
             return True
-        _LAST_HEAL_ERROR = None
-        if not _ollama_up(timeout=2):
-            _log("Ollama is not answering. Starting it from "
-                 "D:\\PhiMove\\.ollama\\models.")
-            if not _start_ollama():
-                _LAST_HEAL_ERROR = "Ollama is not running and could not be started."
-                return False
-            if _wait_ollama_model(30):
-                _log("Ollama is up from D: and gemma3:12b is present.")
-                return True
-            _log("Ollama is up but gemma3:12b is still missing after 30s.")
-        else:
-            # Up, but the brain is not in this instance's store.
-            if _model_in_dir():
-                _log("Ollama is up but gemma3:12b is not in it, and the D: "
-                     "folder holds the model. Restarting Ollama from D:.")
-                if _restart_ollama() and _wait_ollama_model(30):
-                    _log("Ollama is up from D: and gemma3:12b is present.")
-                    return True
-                _log("gemma3:12b is still missing after the restart from D:.")
-                if not _ollama_up(timeout=2):
-                    # The restart left nothing answering. Bring one back
-                    # before anything else, so the pull has a server.
-                    _log("The restart left Ollama down; starting one again.")
-                    if not _start_ollama():
-                        _LAST_HEAL_ERROR = "Ollama is not running and could not be started."
-                        return False
-            else:
-                _log("Ollama is up but gemma3:12b is not in it, and the D: "
-                     "folder does not hold it either. Downloading it.")
-        if _ollama_up(timeout=2) and _start_pull():
-            _log("Her brain is downloading in the background. "
-                 "Chat will say so until it arrives.")
+        if _LAST_HEAL_RESULT == "no_model_on_disk" and now - _LAST_HEAL_AT < _HEAL_COOLDOWN_NO_MODEL:
             return False
-        if not _ollama_up(timeout=2):
+        if _LAST_HEAL_RESULT == "start_failed" and now - _LAST_HEAL_AT < _HEAL_COOLDOWN_START_FAILED:
+            return False
+        _LAST_HEAL_AT = now
+        _LAST_HEAL_ERROR = None
+        if _ollama_up(timeout=2):
+            found = _find_model_dir()
+            if found is None:
+                _LAST_HEAL_ERROR = (
+                    "gemma3:12b was not found in D:\\PhiMove\\.ollama\\models "
+                    "or C:\\Users\\Admin\\.ollama\\models. I never download.")
+                _LAST_HEAL_RESULT = "no_model_on_disk"
+                _log("Ollama is up but gemma3:12b is not in it, and the model "
+                     "is in neither model folder on disk. Not restarting, "
+                     "not downloading.")
+                return False
+            if found == _LAST_RESTART_DIR and now - _LAST_RESTART_AT < _RESTART_COOLDOWN:
+                _LAST_HEAL_ERROR = (
+                    "Ollama was already restarted from " + found +
+                    " and gemma3:12b still is not in it.")
+                _LAST_HEAL_RESULT = "restart_no_help"
+                return False
+            _log("Ollama is up but gemma3:12b is not in it. The model is on "
+                 "disk at " + found + ". Restarting Ollama from there.")
+            if _restart_ollama(found) and _wait_ollama_model(30):
+                _LAST_HEAL_RESULT = "ready"
+                _log("Ollama is up from the folder that holds gemma3:12b.")
+                return True
+            _log("gemma3:12b is still missing after the restart.")
+            if not _ollama_up(timeout=2):
+                _log("The restart left Ollama down; starting one again.")
+                if _start_ollama(found) and _wait_ollama_model(30):
+                    _LAST_HEAL_RESULT = "ready"
+                    return True
+                _LAST_HEAL_ERROR = "Ollama is not running and could not be started."
+                _LAST_HEAL_RESULT = "start_failed"
+                return False
+            _LAST_HEAL_ERROR = (
+                "Ollama was restarted from the folder that holds gemma3:12b "
+                "and the model still is not in it.")
+            _LAST_HEAL_RESULT = "restart_no_help"
+            return False
+        found = _find_model_dir()
+        models_dir = found or OLLAMA_MODELS_DIR
+        _log("Ollama is not answering. Starting it from " + models_dir + ".")
+        if not _start_ollama(models_dir):
             _LAST_HEAL_ERROR = "Ollama is not running and could not be started."
+            _LAST_HEAL_RESULT = "start_failed"
+            return False
+        if _wait_ollama_model(30):
+            _LAST_HEAL_RESULT = "ready"
+            _log("Ollama is up and gemma3:12b is present.")
+            return True
+        if found is None:
+            _LAST_HEAL_ERROR = (
+                "gemma3:12b was not found in D:\\PhiMove\\.ollama\\models "
+                "or C:\\Users\\Admin\\.ollama\\models. I never download.")
+            _LAST_HEAL_RESULT = "no_model_on_disk"
+        else:
+            _LAST_HEAL_ERROR = (
+                "Ollama was started from " + found +
+                " and gemma3:12b still is not in it.")
+            _LAST_HEAL_RESULT = "restart_no_help"
         return False
 
 
@@ -416,7 +491,7 @@ def _heal_worker():
 def _kick_heal():
     """Start the brain heal in a background thread if it is not already
     running. Never blocks the caller: the page keeps answering while
-    Ollama is restarted or the model downloads."""
+    Ollama is restarted or the model is found."""
     global _HEAL_RUNNING
     with _HEAL_LOCK:
         if _HEAL_RUNNING:
@@ -424,7 +499,6 @@ def _kick_heal():
         _HEAL_RUNNING = True
     threading.Thread(target=_heal_worker, daemon=True).start()
     return True
-
 
 def _ollama_chat(messages, num_predict=377):
     """One chat turn against local Ollama. Returns the reply text.
@@ -618,6 +692,8 @@ class Handler(BaseHTTPRequestHandler):
                 "model": MODEL,
                 "ollama_up": _ollama_up(timeout=2),
                 "model_present": _model_present(timeout=3),
+                "model_dir": _find_model_dir(),
+                "model_dirs_checked": list(MODEL_DIRS),
                 "kokoro_files": _kokoro_ready(),
                 "voice": EMMA_VOICE,
             })
@@ -674,31 +750,33 @@ class Handler(BaseHTTPRequestHandler):
         messages = ([{"role": "system", "content": SYSTEM_PROMPT}]
                     + clean_history
                     + [{"role": "user", "content": message}])
-        # Fast check only — never block the reply on the heal. The heal
+        # Fast check only - never block the reply on the heal. The heal
         # runs in a background thread (see main); this route just reports
         # whether the brain is ready right now and kicks the heal if not.
         # The old code called _ensure_ollama() here, which can hold its
-        # lock for 30+ seconds while the heal restarts Ollama — a chat
+        # lock for 30+ seconds while the heal restarts Ollama - a chat
         # sent during the heal would hang instead of getting its 503.
+        # The errors name the true state and never tell Tyree to start
+        # Ollama or download anything himself - the server does it.
         if not (_ollama_up(timeout=2) and _model_present(timeout=3)):
             _kick_heal()
-            if _pull_running():
-                self._send_json(503, {"error": "Her brain (gemma3:12b) is still downloading into Ollama. Give it a few minutes, then Send again."})
-            elif _OLLAMA_MISSING:
+            if _OLLAMA_MISSING:
                 self._send_json(503, {"error": "Her brain cannot start: the Ollama program was not found on this PC. The detail is in phi-emma-local.log."})
             elif not _ollama_up(timeout=2):
-                self._send_json(503, {"error": "Ollama is not running — I am starting it now. Send again in a moment."})
+                self._send_json(503, {"error": "Ollama is not running - I am starting it now. Send again in a moment."})
             elif _LAST_HEAL_ERROR:
-                self._send_json(503, {"error": f"Her brain could not be brought back ({_LAST_HEAL_ERROR}). The detail is in phi-emma-local.log — Send again and I will try once more."})
+                self._send_json(503, {"error": f"Her brain could not be brought back ({_LAST_HEAL_ERROR}). The detail is in phi-emma-local.log - Send again and I will try once more."})
+            elif _HEAL_RUNNING:
+                self._send_json(503, {"error": "Her brain is not in the Ollama that is running yet. I am checking the folders on this PC for it. Send again in a moment."})
             else:
-                self._send_json(503, {"error": "Her brain is not in Ollama yet — I am fetching it. Send again in a moment."})
+                self._send_json(503, {"error": "Her brain is not in the Ollama that is running. I am pointing Ollama at the folder that has it. Send again in a moment."})
             return
         try:
             reply = _ollama_chat(messages, num_predict=body.get("num_predict", 377))
         except RuntimeError as e:
             _log(f"Chat failed ({e}); kicking the heal.")
             _kick_heal()
-            self._send_json(502, {"error": "Her brain hiccuped — Send again in a moment."})
+            self._send_json(502, {"error": "Her brain hiccuped - Send again in a moment."})
             return
         self._send_json(200, {"reply": reply})
 
@@ -712,12 +790,14 @@ def main():
     try:
         # Bind FIRST, heal behind. The old order ran _ensure_ollama()
         # before the server bound the port, and the heal can take 30+
-        # seconds (stop Ollama, start Ollama, wait for the model) - during
-        # that whole window nothing listened on 1620, so the browser got
+        # seconds (start Ollama, wait for the model) - during that whole
+        # window nothing listened on 1620, so the browser got
         # ERR_CONNECTION_REFUSED and the flash's page retries could miss
         # it. Now the page answers from second zero; the brain heals in a
         # background thread and the chat route says plainly (503) until
-        # it arrives.
+        # it arrives. The heal finds the model on disk and never
+        # downloads, and it never opens a console window, so no window
+        # flashes when the page loads or when Tyree presses Send.
         server = ThreadingHTTPServer((HOST, PORT), Handler)
         _log(f"Phi Emma (local) serving {BASE_DIR}")
         _log(f"Open http://{HOST}:{PORT} - no Nuance, no credits, no key.")

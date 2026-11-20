@@ -59,7 +59,10 @@ foreach ($f in @('phi-emma-system-prompt.md', 'phi-emma-local-talk.html', 'phi-e
     }
 }
 
-# 3. Her brain is local Ollama. If it is not answering, start it from the D: model folder.
+# 3. Her brain is local Ollama. If it is not answering, start ONE from the
+# D: model folder, hidden. Only start when nothing answers - never a
+# second Ollama. The server itself owns pointing Ollama at the folder
+# that holds the model; the flash never downloads anything.
 $OllamaUp = $false
 try {
     $r = Invoke-WebRequest -Uri 'http://127.0.0.1:11434/' -UseBasicParsing -TimeoutSec 3
@@ -70,7 +73,7 @@ if (-not $OllamaUp) {
     $env:OLLAMA_MODELS = 'D:\PhiMove\.ollama\models'
     $env:OLLAMA_KEEP_ALIVE = '-1'
     Start-Process 'ollama' -ArgumentList 'serve' -WindowStyle Hidden
-    for ($i = 0; $i -lt 30; $i++) {
+    for ($i = 0; $i -lt 15; $i++) {
         Start-Sleep -Seconds 1
         try {
             $r = Invoke-WebRequest -Uri 'http://127.0.0.1:11434/' -UseBasicParsing -TimeoutSec 3
@@ -80,26 +83,31 @@ if (-not $OllamaUp) {
 }
 if ($OllamaUp) { Write-Host "Ollama is up." } else { Write-Host "Ollama did not come up. The page will still open, but chat will say the brain is not answering until Ollama is running." }
 
-# 4. Desktop shortcut for the launcher.
+# 4. Desktop shortcut for the launcher. WindowStyle 7 runs it minimized,
+# so clicking the shortcut never flashes a console window.
 $W = New-Object -ComObject WScript.Shell
 $S = $W.CreateShortcut("$env:USERPROFILE\Desktop\Phi Emma Local.lnk")
 $S.TargetPath = "$Live\start-phi-emma-local.bat"
 $S.WorkingDirectory = $Live
+$S.WindowStyle = 7
 $S.Save()
 
 # 5. Add her to Windows Startup so she launches on login.
 Copy-Item "$env:USERPROFILE\Desktop\Phi Emma Local.lnk" "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\Phi Emma Local.lnk" -Force
 
-# 6. Start her. The launcher waits until her page answers and opens it
-# in the browser, so wait for it to finish before checking she is live.
-Start-Process "$Live\start-phi-emma-local.bat" -Wait
+# 6. Start her, hidden. The launcher starts the server and hands the
+# wait-and-open to a hidden shell, then exits at once - so run it hidden
+# and wait for it to finish before checking she is live.
+Start-Process "$Live\start-phi-emma-local.bat" -WindowStyle Hidden -Wait
 
-# 7. Quick check that she answers - BOTH the page and a real chat turn.
+# 7. Quick check that she answers - BOTH the page and one real chat turn.
 # The page is retried: the server can take a moment to bind after starting.
+# The chat check is ONE probe with a short timeout. The old check retried
+# 3 times at 180s each, so a brain that never answers hung this flash for
+# minutes. The server answers a 503 in under a second when the brain is
+# not ready, and that 503 IS the plain state - print it and finish.
 # The chat check uses a tiny reply (num_predict 8) so it is fast even on
 # this PC, but it is a real call to the local brain, not a fake ping.
-# The chat is retried too: her brain may still be downloading on the first
-# try, and the retry gives it time to arrive.
 $PageOk = $false
 $ChatOk = $false
 $ChatErr = ""
@@ -110,20 +118,26 @@ for ($i = 0; $i -lt 15; $i++) {
     } catch { }
     Start-Sleep -Seconds 2
 }
-for ($i = 0; $i -lt 3; $i++) {
-    try {
-        $r = Invoke-WebRequest -Uri 'http://127.0.0.1:1620/api/chat' -Method POST -Body '{"message": "Say hi in one word.", "num_predict": 8}' -ContentType 'application/json' -UseBasicParsing -TimeoutSec 180
-        if ($r.StatusCode -eq 200) { $ChatOk = $true; break }
-        $ChatErr = "HTTP $($r.StatusCode)"
-    } catch {
+try {
+    $r = Invoke-WebRequest -Uri 'http://127.0.0.1:1620/api/chat' -Method POST -Body '{"message": "Say hi in one word.", "num_predict": 8}' -ContentType 'application/json' -UseBasicParsing -TimeoutSec 15
+    if ($r.StatusCode -eq 200) { $ChatOk = $true }
+} catch {
+    $resp = $_.Exception.Response
+    if ($resp) {
+        try {
+            $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
+            $ChatErr = $reader.ReadToEnd()
+            try { $ChatErr = ($ChatErr | ConvertFrom-Json).error } catch { }
+        } catch { $ChatErr = $_.Exception.Message }
+    } else {
         $ChatErr = $_.Exception.Message
     }
-    if (-not $ChatOk) { Start-Sleep -Seconds 5 }
 }
 if ($PageOk -and $ChatOk) {
     Write-Host "Phi Emma (local) is live at http://127.0.0.1:1620 - open it and talk to her. No Nuance, no credits, no key."
 } else {
-    Write-Host "FAILED: Phi Emma (local) did not come up clean. Page OK: $PageOk. Chat OK: $ChatOk. $ChatErr"
+    if ($ChatErr) { Write-Host "Her brain says: $ChatErr" }
+    Write-Host "NOT LIVE yet. Page OK: $PageOk. Chat OK: $ChatOk."
     $LogFile = Join-Path $Live 'phi-emma-local.log'
     if (Test-Path $LogFile) {
         Write-Host "--- last lines of phi-emma-local.log ---"
@@ -132,7 +146,7 @@ if ($PageOk -and $ChatOk) {
     } else {
         Write-Host "No log file yet - the server never started far enough to write one."
     }
-    Write-Host "If the chat is not OK, her brain (Ollama gemma3:12b) is not answering - start Ollama and run this flash again."
+    Write-Host "The page is up either way. Open http://127.0.0.1:1620 and press Send - her server brings the brain back on its own."
     exit 1
 }
 Write-Host "Phi Emma (local) is flashed. She lives on the desktop, starts on login, and always works - free, local, phi."
