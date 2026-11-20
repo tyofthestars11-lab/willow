@@ -4,7 +4,18 @@ Say "stop playing" or slam the mouse into a screen corner to stop her hands."""
 import base64, io, json, re, threading, time, urllib.request
 
 EYES_MODEL = "gemma3:12b"
+# The brain is whichever Ollama lists gemma3:12b - 11434 normally,
+# 11435 when the fallback is serving it. Resolved fresh per look, so
+# her eyes follow the same fallback as her voice.
 OLLAMA = "http://localhost:11434/api/chat"
+
+
+def _brain_chat_url():
+    try:
+        import willow_type as _w
+        return _w.resolve_ollama_url() or OLLAMA
+    except Exception:
+        return OLLAMA
 STOP = threading.Event()
 KEYS = {"space", "enter", "esc", "tab", "w", "a", "s", "d", "e", "f", "i", "m", "j", "1", "2", "3", "4", "5", "6"}
 SEE = re.compile(r"\b(what do you see|what'?s on (my|the) screen|look at (my|the) screen|describe (my|the) screen|use your eyes|can you see)\b", re.I)
@@ -31,7 +42,7 @@ def look(prompt, b64, fmt=None):
                "options": {"temperature": 0.382, "num_predict": 233}}
     if fmt:
         payload["format"] = fmt
-    req = urllib.request.Request(OLLAMA, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(_brain_chat_url(), data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
     parts = []
     with urllib.request.urlopen(req, timeout=600) as resp:  # stream: gemma is slow, one long read times out
         for line in resp:

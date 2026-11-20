@@ -67,44 +67,27 @@ foreach ($f in @('phi-emma-system-prompt.md', 'phi-emma-local-talk.html', 'phi-e
 }
 Write-Host "[3/7] Files are in place."
 
-# [4/7] Her brain is local Ollama. If it is not answering, start ONE from the
-# D: model folder, hidden. Only start when nothing answers - never a
-# second Ollama. The server itself owns pointing Ollama at the folder
-# that holds the model; the flash never downloads anything.
+# [4/7] Her brain is local Ollama. Check BOTH ports: 11434 (normal) and
+# 11435 (the fallback her server starts when 11434 is stuck and does
+# not list the model). The flash never starts an Ollama itself and
+# never kills one - her server owns that: it leaves a stuck 11434
+# alone and starts a second Ollama on 11435 from the folder that
+# holds the verified model. The flash never downloads anything.
 Write-Host "[4/7] Checking Ollama..."
-$OllamaUp = $false
-try {
-    $r = Invoke-WebRequest -Uri 'http://127.0.0.1:11434/' -UseBasicParsing -TimeoutSec 3
-    if ($r.StatusCode -eq 200) { $OllamaUp = $true }
-} catch { }
-if (-not $OllamaUp) {
-    Write-Host "Ollama is not answering - starting it from D:\PhiMove\.ollama\models."
-    $env:OLLAMA_MODELS = 'D:\PhiMove\.ollama\models'
-    $env:OLLAMA_KEEP_ALIVE = '-1'
-    Start-Process 'ollama' -ArgumentList 'serve' -WindowStyle Hidden
-    for ($i = 0; $i -lt 10; $i++) {
-        Start-Sleep -Seconds 1
-        try {
-            $r = Invoke-WebRequest -Uri 'http://127.0.0.1:11434/' -UseBasicParsing -TimeoutSec 2
-            if ($r.StatusCode -eq 200) { $OllamaUp = $true; break }
-        } catch { }
-    }
-}
-if ($OllamaUp) {
-    Write-Host "Ollama is up."
+$BrainPort = $null
+foreach ($p in @(11434, 11435)) {
     try {
-        $tags = Invoke-WebRequest -Uri 'http://127.0.0.1:11434/api/tags' -UseBasicParsing -TimeoutSec 3 | ConvertFrom-Json
+        $tags = Invoke-WebRequest -Uri "http://127.0.0.1:$p/api/tags" -UseBasicParsing -TimeoutSec 3 | ConvertFrom-Json
         $names = @($tags.models | ForEach-Object { $_.name })
         if ($names -contains 'gemma3:12b') {
-            Write-Host "gemma3:12b is in Ollama."
-        } else {
-            Write-Host "gemma3:12b is NOT in Ollama yet (models in it: $($names -join ', ')). Her server will point Ollama at the folder that has it."
+            $BrainPort = $p
+            Write-Host "gemma3:12b is in Ollama on port $p."
+            break
         }
-    } catch {
-        Write-Host "Could not read the model list from Ollama. Her server will point Ollama at the folder that has it."
-    }
-} else {
-    Write-Host "Ollama did not come up. The page will still open, but chat will say the brain is not answering until Ollama is running."
+    } catch { }
+}
+if (-not $BrainPort) {
+    Write-Host "gemma3:12b is not in either Ollama yet. Her server will bring up a second Ollama on 11435 from the folder that has it - nothing for you to start or check."
 }
 Write-Host "[4/7] Ollama check done."
 

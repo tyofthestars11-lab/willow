@@ -133,8 +133,15 @@ def respond(text):
 
 def vitals():
     v = {"dlam": w.dlam_on(), "voice": w.VOICE_ON, "model": w.LLM_MODEL, "loaded": [], "gpu": None}
+    # The brain is whichever Ollama lists gemma3:12b - 11434 normally,
+    # 11435 when the fallback is serving it. Ask the resolved port,
+    # not a hard-coded 11434, or the Center reports the brain asleep
+    # while Willow is happily answering on 11435.
+    port = w.resolve_ollama_port()
+    v["ollama_port"] = port
     try:
-        ps = json.loads(urllib.request.urlopen("http://localhost:11434/api/ps", timeout=3).read())
+        ps_url = "http://127.0.0.1:%d/api/ps" % (port or 11434)
+        ps = json.loads(urllib.request.urlopen(ps_url, timeout=3).read())
         v["loaded"] = [{"name": m.get("name"), "vram_mb": round(m.get("size_vram", 0) / 1048576)} for m in ps.get("models", [])]
     except Exception:
         v["loaded"] = None

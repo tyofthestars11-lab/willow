@@ -229,6 +229,8 @@ def _respond(text):
     except Exception as e:
         if "timed out" in str(e).lower() or "timeout" in str(e).lower():
             say("The brain took too long to answer that one. I'm still here — try again and I'll pick it up fresh.", "Guard")
+        elif "gemma3:12b" in str(e) or "brain" in str(e).lower():
+            say("My brain isn't back yet — I'm bringing it up myself. Try again in a moment.", "Guard")
         else:
             say(f"Something went wrong: {e}", "Guard")
     finally:
@@ -457,115 +459,35 @@ def _build_ui():
 
 
 # ---------- boot: brain server, telemetry, ears ----------
-def _ollama_up(timeout=2):
-    try:
-        with urllib.request.urlopen("http://localhost:11434/api/ps", timeout=timeout) as r:
-            return r.status == 200
-    except Exception:
-        return False
+def _ollama_up(port=11434, timeout=2):
+    # Thin wrapper over the shared brain check in willow_type, so the
+    # widget, the Command Center and Emma all read the same ports.
+    return w._ollama_up(port, timeout=timeout)
 
 
-def _model_present(timeout=3):
-    # The server answering /api/ps only proves a server is up — not that it
+def _model_present(port=11434, timeout=3):
+    # The server answering only proves a server is up - not that it
     # has the brain. Ollama answers 404 for a model that is not in the
-    # serving instance's store (wrong model folder), so check the model too.
-    try:
-        with urllib.request.urlopen("http://localhost:11434/api/tags", timeout=timeout) as r:
-            data = json.loads(r.read())
-        names = [m.get("name", "") for m in data.get("models", [])]
-        return any(n == w.LLM_MODEL or n.startswith(w.LLM_MODEL + ":") for n in names)
-    except Exception:
-        return False
-
-
-def _stop_ollama():
-    # Stop whatever holds port 11434 so a fresh server can start from the
-    # right model folder. The one running may serve the stale C: copy.
-    try:
-        subprocess.run(["powershell", "-NoProfile", "-Command",
-                        "$c = Get-NetTCPConnection -LocalPort 11434 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; if ($c) { Stop-Process -Id $c.OwningProcess -Force }"],
-                       capture_output=True, timeout=15)
-    except Exception:
-        pass
-    for _ in range(10):
-        time.sleep(1)
-        if not _ollama_up():
-            return True
-    return not _ollama_up()
-
-
-def _pull_model(env):
-    # Download the brain into the serving instance's store. Ollama pull is
-    # slow (~8 GB), so poll instead of blocking on a pipe — its progress
-    # output would fill a pipe buffer and deadlock. Output goes to a log
-    # file; only the tail is read if it fails.
-    log_path = HERE / "ollama_pull.log"
-    try:
-        with open(log_path, "w", encoding="utf-8") as lf:
-            proc = subprocess.Popen(["ollama", "pull", w.LLM_MODEL], env=env,
-                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                                    stdout=lf, stderr=subprocess.STDOUT)
-    except Exception as e:
-        return False, f"couldn't start the download: {e}"
-    deadline = time.time() + 1800  # 30 minutes for ~8 GB
-    while proc.poll() is None:
-        if time.time() > deadline:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-            return False, "the download took longer than 30 minutes"
-        time.sleep(5)
-    if proc.returncode != 0:
-        tail = ""
-        try:
-            lines = log_path.read_text(encoding="utf-8", errors="replace").strip().splitlines()
-            tail = lines[-1][:300] if lines else ""
-        except Exception:
-            pass
-        return False, f"the download failed (exit {proc.returncode})" + (f": {tail}" if tail else "")
-    return True, ""
+    # serving instance's store (wrong model folder), so check the model
+    # too, on the port asked for (11434 normally, 11435 fallback).
+    return w._model_present(port, timeout=timeout)
 
 
 def _ensure_ollama():
-    if _ollama_up() and _model_present():
+    """Bring Willow's brain back, the same way Emma does: 11434 first,
+    then the 11435 fallback from the verified folder on disk. The
+    stuck Ollama on 11434 is never killed and never restarted, and
+    nothing is ever downloaded - the model is already on this PC.
+    Returns True when a brain lists gemma3:12b. On failure the Guard
+    says plainly that the brain is not back yet and that Willow is
+    bringing it up herself - never that Tyree should check a folder,
+    restart anything, or start Ollama."""
+    if w.ensure_ollama():
         return True
-    # Server down, or up but serving the wrong model folder so gemma3:12b is
-    # missing and every answer 404s. Restart it from the right folder.
-    _stop_ollama()
-    env = dict(os.environ)
-    env["OLLAMA_MODELS"] = r"D:\PhiMove\.ollama\models"
-    env["OLLAMA_KEEP_ALIVE"] = "-1"
-    try:
-        subprocess.Popen(["ollama", "serve"], env=env,
-                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception as e:
-        UIQ.put(("say", "Guard", f"Couldn't start Ollama: {e}"))
-        return False
-    for _ in range(30):
-        time.sleep(1)
-        if _ollama_up() and _model_present():
-            return True
-    # The restart didn't bring the model back — it is genuinely absent
-    # from disk, so no restart will fix it. Download it into the serving
-    # instance's store. This is the fix, and it runs itself: the pull
-    # lands wherever the running server keeps its models, so it heals
-    # the 404 even if the old server is still the one holding the port.
-    if not _ollama_up():
-        UIQ.put(("say", "Guard", "Ollama still isn't answering after the restart, so I can't download the brain."))
-        return False
-    UIQ.put(("status", "Willow's brain is downloading — one moment, this is the fix."))
-    say("My brain is downloading — one moment, this is the fix.")
-    ok, why = _pull_model(env)
-    if not ok:
-        UIQ.put(("say", "Guard", f"The brain download failed ({why}). I tried restarting Ollama from the D: folder and downloading gemma3:12b — nothing for you to check."))
-        return False
-    for _ in range(60):
-        time.sleep(1)
-        if _model_present():
-            return True
-    UIQ.put(("say", "Guard", "The brain downloaded but Ollama still doesn't list gemma3:12b. I tried restarting from the D: folder and downloading it."))
+    reason = w._LAST_BRAIN_ERROR or "the brain is not back yet"
+    UIQ.put(("say", "Guard",
+             "My brain isn't back yet - I'm bringing it up myself, no need to check anything. "
+             f"({reason})"))
     return False
 
 
@@ -590,10 +512,10 @@ def _boot():
     except Exception:
         pass
     if _ensure_ollama():
-        UIQ.put(("status", "Brain awake"))
+        port = w.resolve_ollama_port()
+        UIQ.put(("status", "Brain awake" + (f" (port {port})" if port else "")))
     else:
-        UIQ.put(("say", "Guard", "Ollama isn't answering. Start it and I'll wake up."))
-        UIQ.put(("status", "Brain offline"))
+        UIQ.put(("status", "Brain offline — healing itself"))
     say("I'm here, Tyree. Talk to me or type — I'm listening.")
 
 

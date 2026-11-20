@@ -101,7 +101,18 @@ def _stream_chat(payload, timeout=600):
     # Stream the reply from Ollama instead of waiting for the whole thing:
     # gemma3:12b is slow on this PC, and one long read times out before it
     # finishes. Tokens keep arriving, so the socket never goes idle long.
-    req = urllib.request.Request(w.OLLAMA_URL, data=json.dumps(payload).encode(),
+    # The brain is whichever Ollama lists gemma3:12b - 11434 normally,
+    # 11435 when the fallback is serving it. If neither lists it, bring
+    # the fallback up first (w.ensure_ollama) instead of 404ing against
+    # the stuck 11434 and telling Tyree to fix it.
+    url = w.resolve_ollama_url()
+    if url is None:
+        w.ensure_ollama()
+        url = w.resolve_ollama_url()
+    if url is None:
+        raise RuntimeError(
+            "No Ollama lists gemma3:12b. " + (w._LAST_BRAIN_ERROR or "The brain is not back yet."))
+    req = urllib.request.Request(url, data=json.dumps(payload).encode(),
                                  headers={"Content-Type": "application/json"})
     parts = []
     try:
@@ -115,7 +126,7 @@ def _stream_chat(payload, timeout=600):
         except Exception:
             detail = ""
         raise RuntimeError(
-            f"Ollama {w.OLLAMA_URL} said HTTP {e.code} for model {payload.get('model')}: {detail or e}")
+            f"Ollama {url} said HTTP {e.code} for model {payload.get('model')}: {detail or e}")
     with resp as resp:
         for line in resp:
             line = line.strip()
@@ -324,7 +335,7 @@ def main():
         try:
             reply = ask(SEARCH_PROMPT, history[-16:] + [{"role": "user", "content": text}])
         except Exception as e:
-            print(f"I can't reach Ollama. Is it running? ({e})")
+            print(f"My brain isn't back yet - I'm bringing it up myself. ({e})")
             continue
         history += [{"role": "user", "content": text}, {"role": "assistant", "content": json.dumps(reply)}]
         query = str(reply.get("search", "")).strip()

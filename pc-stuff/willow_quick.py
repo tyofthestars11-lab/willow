@@ -1,5 +1,19 @@
 ﻿import json, subprocess, time, urllib.request
-URL = "http://localhost:11434/api/chat"
+# The brain is whichever Ollama lists gemma3:12b - 11434 normally,
+# 11435 when the fallback is serving it.
+def _brain_url():
+    for base in ("http://127.0.0.1:11434", "http://127.0.0.1:11435"):
+        try:
+            with urllib.request.urlopen(base + "/api/tags", timeout=3) as r:
+                data = json.loads(r.read().decode("utf-8", "replace"))
+            for m in data.get("models", []):
+                name = m.get("name", "")
+                if name == "gemma3:12b" or name.startswith("gemma3:12b:"):
+                    return base + "/api/chat"
+        except Exception:
+            continue
+    return "http://localhost:11434/api/chat"
+URL = _brain_url()
 Q = ["What is 89 plus 144?", "In one sentence, what is the golden ratio?", "Say hello to Tyree in five words.", "Give a one-line quest idea for a glowing beacon.", "Name three things a game hub market needs."]
 def ask(p):
     b = json.dumps({"model": "gemma3:12b", "stream": False, "keep_alive": -1, "options": {"num_predict": 144}, "messages": [{"role": "user", "content": p}]}).encode()

@@ -86,8 +86,20 @@ def telemetry():
     except Exception:
         pass
     try:
-        ps = json.loads(urllib.request.urlopen("http://localhost:11434/api/ps", timeout=3).read())
-        lines.append("Models loaded: " + ", ".join(m.get("name", "?") for m in ps.get("models", [])))
+        # The brain is whichever Ollama lists gemma3:12b - 11434
+        # normally, 11435 when the fallback is serving it. Check both
+        # ports for loaded models instead of a hard-coded 11434.
+        loaded = []
+        for _port in (11434, 11435):
+            try:
+                ps = json.loads(urllib.request.urlopen(
+                    "http://localhost:%d/api/ps" % _port, timeout=3).read())
+                loaded = [m.get("name", "?") for m in ps.get("models", [])]
+                if loaded:
+                    break
+            except Exception:
+                continue
+        lines.append("Models loaded: " + ", ".join(loaded))
     except Exception:
         pass
     for d in "CDEFG":

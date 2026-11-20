@@ -37,16 +37,24 @@ Copy-Item "$Work\pc-stuff\*" $Live -Recurse -Force -Exclude __pycache__, willow_
 [Environment]::SetEnvironmentVariable('OLLAMA_MODELS', 'D:\PhiMove\.ollama\models', 'User')
 [Environment]::SetEnvironmentVariable('OLLAMA_KEEP_ALIVE', '-1', 'User')
 
-# 4. Make sure her brain server is up (starts the D: server if it is not).
-try {
-    $env:OLLAMA_MODELS = 'D:\PhiMove\.ollama\models'
-    $env:OLLAMA_KEEP_ALIVE = '-1'
-    ollama list 2>$null | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "ollama not answering" }
-} catch {
-    Write-Host "Ollama was not answering - starting her brain server."
-    Start-Process ollama -ArgumentList 'serve' -WindowStyle Minimized -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 5
+# 4. Her brain is local Ollama. Check BOTH ports: 11434 (normal) and
+#    11435 (the fallback her widget starts when 11434 is stuck and does
+#    not list the model). The flash never starts an Ollama itself and
+#    never kills one - the widget owns that: it leaves a stuck 11434
+#    alone and starts a second Ollama on 11435 from the folder that
+#    holds the verified model. The flash never downloads anything.
+$BrainPort = $null
+foreach ($p in @(11434, 11435)) {
+    try {
+        $tags = Invoke-WebRequest -Uri "http://127.0.0.1:$p/api/tags" -UseBasicParsing -TimeoutSec 3 | ConvertFrom-Json
+        $names = @($tags.models | ForEach-Object { $_.name })
+        if ($names -contains 'gemma3:12b') { $BrainPort = $p; break }
+    } catch { }
+}
+if ($BrainPort) {
+    Write-Host "Her brain (gemma3:12b) is in Ollama on port $BrainPort."
+} else {
+    Write-Host "gemma3:12b is not in either Ollama yet. Her widget will bring up a second Ollama on 11435 from the folder that has it - nothing for you to start or check."
 }
 
 # 5. Desktop shortcut for the widget launcher.

@@ -5,8 +5,16 @@ She runs on the same local stack as Willow: local Ollama (gemma3:12b) for
 the brain, local Kokoro for the voice, her own merged phi prompt for who
 she is. Serves 127.0.0.1:1620. Willow is 1618, Nuance Emma is 1619, local
 Emma is 1620 - three doors, no collisions. Willow and Emma share ONE
-brain: the same gemma3:12b on the same Ollama on 11434. There is only
-ever one Ollama, and this server never starts a second one.
+brain: the same gemma3:12b. It is normally served by the Ollama on
+11434. That Ollama can get stuck: it stays up, does not list the
+model, and cannot be killed from here (its port never frees and its
+owner cannot be determined). So this server never fights it. When
+11434 does not list gemma3:12b, this server brings up a SECOND Ollama
+on 11435, pointed at the folder that holds the verified model, and
+uses 11435 for chat. The stuck 11434 is left alone - it is idle, it
+holds no model and no VRAM, and the 11435 server is the only one
+loading gemma3:12b. If 11434 lists the model again, 11434 is used
+and no second Ollama is started.
 
 Routes:
   GET  /              the talk page
@@ -39,29 +47,27 @@ for the gemma3:12b manifest and verifies EVERY blob it names - the blob
 must exist, its size must match the manifest, and its SHA-256 must match
 its digest. A half-moved or truncated copy passes an existence check
 but Ollama rejects it, so a folder only counts when every blob verifies.
-If a folder has it, Ollama is restarted ONCE from that folder and the
-restart is PROVED: every ollama.exe is killed, the port is polled until
-it is actually free, and the new server must own port 11434 and list
-the model before the restart counts as done. If the port never frees,
-or the model still is not listed after a verified restart, the server
-says exactly which step failed instead of pretending the restart
-worked. If no folder has it, the server says so plainly - naming the
-folders checked and which blobs are bad - and stops. It never
-downloads. There is no download anywhere in this file.
+If a folder has it, a second Ollama is started on 11435 from that
+folder and the start is PROVED: the 11435 server must list the model
+before the fallback counts as done. The stuck Ollama on 11434 is
+never killed and never restarted - killing it was tried and it does
+not die, so it is left alone. If no folder has a complete verified
+copy, the server says so plainly - naming the folders checked and
+which blobs are bad - and stops. It never downloads. There is no
+download anywhere in this file.
 
-No console shell anywhere in this file either. Ollama is started and
-stopped with hidden Python subprocesses (CREATE_NO_WINDOW), so no
-console window ever flashes when the page loads or when Tyree presses
-Send. The server binds port 1620 FIRST and heals the brain in a
-background thread, so the page answers from second zero even while
-the heal is still running - a missing brain never takes the page down,
-and never delays it either.
+No console shell anywhere in this file either. Ollama is started
+with hidden Python subprocesses (CREATE_NO_WINDOW), so no console
+window ever flashes when the page loads or when Tyree presses Send.
+The server binds port 1620 FIRST and heals the brain in a background
+thread, so the page answers from second zero even while the heal is
+still running - a missing brain never takes the page down, and never
+delays it either.
 """
 import hashlib
 import io
 import json
 import os
-import signal
 import socket
 import subprocess
 import sys
@@ -82,10 +88,27 @@ LOG_FILE = os.path.join(BASE_DIR, "phi-emma-local.log")
 
 HOST = "127.0.0.1"
 PORT = 1620
+# The brain's ports. 11434 is the normal Ollama; 11435 is the fallback
+# this server starts itself when 11434 is up but does not list the
+# model (stuck, wrong folder, cannot be killed). 11434 is never killed.
+OLLAMA_PRIMARY_PORT = 11434
+OLLAMA_FALLBACK_PORT = 11435
 OLLAMA_URL = "http://localhost:11434/api/chat"
 OLLAMA_TAGS_URL = "http://localhost:11434/api/tags"
 OLLAMA_ROOT_URL = "http://127.0.0.1:11434/"
 MODEL = "gemma3:12b"
+
+
+def _ollama_root_url(port):
+    return "http://127.0.0.1:%d/" % port
+
+
+def _ollama_tags_url(port):
+    return "http://127.0.0.1:%d/api/tags" % port
+
+
+def _ollama_chat_url(port):
+    return "http://127.0.0.1:%d/api/chat" % port
 PHI = 1.618033988749895
 EMMA_VOICE = "af_bella"      # her voice: distinct from Willow's af_heart
 FALLBACK_VOICE = "af_heart"  # Willow's voice, if af_bella is not in the pack
@@ -104,23 +127,27 @@ MODEL_DIRS = [OLLAMA_MODELS_DIR, OLLAMA_MODELS_C_DIR]
 # _LAST_HEAL_ERROR holds the plain reason the last heal failed, or None;
 # the chat route uses it to name the true state instead of guessing.
 # _LAST_HEAL_AT / _LAST_HEAL_RESULT give the heal a short memory so a
-# Send cannot make it redo expensive work (restart Ollama, rescan)
+# Send cannot make it redo expensive work (start a fallback Ollama, rescan)
 # over and over: if the last heal already concluded the model is not
 # on disk, the next Sends just report that state until the cooldown
-# passes. _LAST_RESTART_DIR / _LAST_RESTART_AT remember the last
-# restart, so the server never restarts Ollama from the same folder
-# twice in a row when it did not help. _OLLAMA_PROC is the Ollama
-# process this server started itself, so it can be ended directly.
+# passes. _LAST_FALLBACK_DIR / _LAST_FALLBACK_AT remember the last
+# 11435 start, so the server never starts a second Ollama from the same
+# folder twice in a row when it did not help. _OLLAMA_PROC is the 11435
+# Ollama process this server started itself. _ACTIVE_OLLAMA_PORT is the
+# port whose Ollama lists gemma3:12b right now (11434 normally, 11435
+# when the fallback is in use); _ACTIVE_OLLAMA_URL is its chat URL.
 _OLLAMA_MISSING = False
 _LAST_HEAL_ERROR = None
 _LAST_HEAL_AT = 0.0
 _LAST_HEAL_RESULT = None
-_LAST_RESTART_DIR = None
-_LAST_RESTART_AT = 0.0
+_LAST_FALLBACK_DIR = None
+_LAST_FALLBACK_AT = 0.0
 _OLLAMA_PROC = None
+_ACTIVE_OLLAMA_PORT = OLLAMA_PRIMARY_PORT
+_ACTIVE_OLLAMA_URL = _ollama_chat_url(OLLAMA_PRIMARY_PORT)
 _HEAL_COOLDOWN_NO_MODEL = 60.0
 _HEAL_COOLDOWN_START_FAILED = 15.0
-_RESTART_COOLDOWN = 300.0
+_FALLBACK_COOLDOWN = 300.0
 
 FALLBACK_PROMPT = (
     "You are Emma, the phi version. You speak to Tyree in short spoken turns. "
@@ -159,17 +186,17 @@ SYSTEM_PROMPT = _load_prompt()
 
 # ---------- Ollama ----------
 
-def _ollama_up(timeout=2):
+def _ollama_up(port=OLLAMA_PRIMARY_PORT, timeout=2):
     try:
-        with urllib.request.urlopen(OLLAMA_ROOT_URL, timeout=timeout) as r:
+        with urllib.request.urlopen(_ollama_root_url(port), timeout=timeout) as r:
             return r.status == 200
     except Exception:
         return False
 
 
-def _model_present(timeout=3):
+def _model_present(port=OLLAMA_PRIMARY_PORT, timeout=3):
     try:
-        with urllib.request.urlopen(OLLAMA_TAGS_URL, timeout=timeout) as r:
+        with urllib.request.urlopen(_ollama_tags_url(port), timeout=timeout) as r:
             data = json.loads(r.read().decode("utf-8", "replace"))
         for m in data.get("models", []):
             name = m.get("name", "")
@@ -180,11 +207,45 @@ def _model_present(timeout=3):
     return False
 
 
-def _ollama_env(models_dir):
+def _resolve_brain_port():
+    """The port whose Ollama lists gemma3:12b right now, or None.
+    11434 first (normal path, unchanged); 11435 second (the fallback
+    this server or Willow started). Never starts anything - it only
+    reads /api/tags on each port."""
+    global _ACTIVE_OLLAMA_PORT, _ACTIVE_OLLAMA_URL
+    for port in (OLLAMA_PRIMARY_PORT, OLLAMA_FALLBACK_PORT):
+        if _model_present(port):
+            _ACTIVE_OLLAMA_PORT = port
+            _ACTIVE_OLLAMA_URL = _ollama_chat_url(port)
+            return port
+    return None
+
+
+def _resolve_brain_url():
+    port = _resolve_brain_port()
+    return _ollama_chat_url(port) if port else None
+
+
+def _ollama_env(models_dir, port=None):
     env = dict(os.environ)
     env["OLLAMA_MODELS"] = models_dir
     env["OLLAMA_KEEP_ALIVE"] = "-1"
+    if port is not None:
+        # OLLAMA_HOST is how a second Ollama listens on 11435 instead
+        # of the default 11434. Without it a second serve would fight
+        # the stuck one for 11434 and lose.
+        env["OLLAMA_HOST"] = "127.0.0.1:%d" % port
     return env
+
+
+def _ollama_cmd():
+    """The ollama command to run. Normally just ["ollama", "serve"].
+    OLLAMA_CMD (space-separated) is a test hook so a fake Ollama can
+    be substituted in a simulation; it is never set on the real PC."""
+    override = os.environ.get("OLLAMA_CMD")
+    if override:
+        return override.split()
+    return ["ollama", "serve"]
 
 
 def _port_free(port):
@@ -202,20 +263,116 @@ def _port_free(port):
 
 def _parse_netstat_owner(text, port):
     """Parse Windows `netstat -ano` output; return the PID listening on
-    127.0.0.1:port, or None. Unit-testable: the text is the only input."""
-    want = "127.0.0.1:%d" % port
+    port, or None. Checks every way Ollama can listen: 127.0.0.1:port,
+    0.0.0.0:port, [::]:port and [::1]:port. The old parser only knew
+    127.0.0.1, so an Ollama bound to [::] looked ownerless and its
+    port looked unkillable-for-no-reason. Unit-testable: the text is
+    the only input."""
+    want = {"127.0.0.1:%d" % port, "0.0.0.0:%d" % port,
+            "[::]:%d" % port, "[::1]:%d" % port}
     for line in text.splitlines():
         parts = line.split()
         if len(parts) < 5:
             continue
         if parts[0] != "TCP":
             continue
-        if parts[1] == want and parts[3] == "LISTENING":
+        if parts[1] in want and parts[3] == "LISTENING":
             try:
                 return int(parts[4])
             except ValueError:
                 return None
     return None
+
+
+def _parse_tasklist_ollama_pids(text):
+    """Parse Windows `tasklist /FO CSV /NH` output; return the PIDs of
+    every ollama.exe. Unit-testable: the text is the only input."""
+    pids = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith('"'):
+            continue
+        fields = [f.strip('"') for f in line.split('","')]
+        if len(fields) >= 2 and fields[0].lower() == "ollama.exe":
+            try:
+                pids.append(int(fields[1]))
+            except ValueError:
+                continue
+    return pids
+
+
+def _ollama_pids():
+    """Every ollama.exe PID on this PC, or [] if it cannot be told.
+    Windows: hidden tasklist. Linux: /proc cmdlines naming ollama."""
+    if os.name == "nt":
+        try:
+            out = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq ollama.exe", "/FO", "CSV", "/NH"],
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                timeout=10, text=True)
+            return _parse_tasklist_ollama_pids(out.stdout or "")
+        except Exception:
+            return []
+    pids = []
+    try:
+        for pid in [x for x in os.listdir("/proc") if x.isdigit()]:
+            try:
+                with open("/proc/" + pid + "/cmdline", "rb") as f:
+                    cmd = f.read().decode("utf-8", "replace")
+            except OSError:
+                continue
+            if "ollama" in cmd:
+                pids.append(int(pid))
+    except Exception:
+        pass
+    return pids
+
+
+def _port_owner_via_net_tcp_connection(port):
+    """Windows fallback: Get-NetTCPConnection -LocalPort <port> gives
+    the OwningProcess directly, even when netstat's text parse finds
+    nothing. Hidden PowerShell, output captured. Returns the PID or
+    None. Linux: None (the /proc path in _port_owner_pid covers it)."""
+    if os.name != "nt":
+        return None
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-NetTCPConnection -LocalPort %d -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty OwningProcess" % port],
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=10, text=True)
+        text = (out.stdout or "").strip()
+        if text:
+            return int(text.split()[0])
+    except Exception:
+        pass
+    return None
+
+
+def _diagnose_port_owner(port):
+    """Log who holds a port, with the evidence, and return the plain
+    description. Tries netstat (IPv4 + IPv6), then
+    Get-NetTCPConnection, then lists every ollama.exe PID. This is
+    diagnostics only: nothing here kills anything, and a port whose
+    owner cannot be determined is reported as exactly that - the
+    11435 fallback must work even then. Nothing is ever killed on
+    the strength of this diagnosis."""
+    owner = _port_owner_pid(port)
+    image = _pid_image_name(owner) if owner else None
+    pids = _ollama_pids()
+    if owner:
+        msg = ("port %d is held by PID %d%s; ollama.exe PIDs on this PC: %s"
+               % (port, owner, (" (" + image + ")") if image else "",
+                  ", ".join(str(x) for x in pids) if pids else "none"))
+    else:
+        msg = ("port %d is held but its owner could not be determined "
+               "(netstat IPv4/IPv6 and Get-NetTCPConnection found nothing); "
+               "ollama.exe PIDs on this PC: %s"
+               % (port, ", ".join(str(x) for x in pids) if pids else "none"))
+    _log("Port owner diagnosis: " + msg + ". The stuck server is left alone; the 11435 fallback is used instead.")
+    return msg
 
 
 def _parse_proc_net_tcp_owner(text, port):
@@ -238,11 +395,13 @@ def _parse_proc_net_tcp_owner(text, port):
 
 
 def _port_owner_pid(port):
-    """The PID of the process listening on 127.0.0.1:port, or None if it
-    cannot be determined. Windows: hidden netstat -ano. Linux: the
-    listening socket's inode from /proc/net/tcp, matched to a process
-    through /proc/<pid>/fd. Best effort - None just means 'cannot tell',
-    never 'nobody'."""
+    """The PID of the process listening on port, or None if it
+    cannot be determined. Windows: hidden netstat -ano (IPv4 and IPv6
+    listeners), falling back to Get-NetTCPConnection -LocalPort, which
+    gives the OwningProcess directly when netstat's text parse finds
+    nothing. Linux: the listening socket's inode from /proc/net/tcp,
+    matched to a process through /proc/<pid>/fd. Best effort - None
+    just means 'cannot tell', never 'nobody'."""
     if os.name == "nt":
         try:
             out = subprocess.run(
@@ -250,9 +409,12 @@ def _port_owner_pid(port):
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 timeout=10, text=True)
-            return _parse_netstat_owner(out.stdout or "", port)
+            pid = _parse_netstat_owner(out.stdout or "", port)
+            if pid is not None:
+                return pid
         except Exception:
-            return None
+            pass
+        return _port_owner_via_net_tcp_connection(port)
     try:
         with open("/proc/net/tcp", encoding="utf-8") as f:
             inode = _parse_proc_net_tcp_owner(f.read(), port)
@@ -320,62 +482,6 @@ def _pid_alive(pid):
         return True
     except OSError:
         return False
-
-
-def _kill_ollama_processes():
-    """Kill ALL ollama processes, hidden - not just this server's own
-    child, not just the port listener. Windows: hidden taskkill /F /IM
-    ollama.exe. Linux: every process whose cmdline names ollama (except
-    this server itself), SIGTERM then SIGKILL. Returns (killed_any,
-    detail)."""
-    if os.name == "nt":
-        try:
-            subprocess.run(
-                ["taskkill", "/F", "/IM", "ollama.exe"],
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                timeout=20)
-            return True, "taskkill /F /IM ollama.exe ran"
-        except FileNotFoundError:
-            return False, "taskkill not found"
-        except Exception as e:
-            return False, "taskkill failed (%s)" % e
-    try:
-        pids = []
-        for pid in [p for p in os.listdir("/proc") if p.isdigit()]:
-            if int(pid) == os.getpid():
-                continue
-            try:
-                with open("/proc/" + pid + "/cmdline", "rb") as f:
-                    cmd = f.read().decode("utf-8", "replace")
-            except OSError:
-                continue
-            if "ollama" in cmd:
-                pids.append(int(pid))
-    except Exception:
-        return False, "could not list processes"
-    if not pids:
-        return False, "no ollama process found"
-    killed_any = bool(pids)
-    total = len(pids)
-    for pid in pids:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
-    deadline = time.time() + 3
-    while time.time() < deadline and pids:
-        pids = [p for p in pids if _pid_alive(p)]
-        if pids:
-            time.sleep(0.2)
-    for pid in pids:
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except OSError:
-            pass
-    if killed_any:
-        return True, "killed %d ollama process(es)" % total
-    return False, "no ollama process found"
 
 
 _VERIFY_CACHE = {}
@@ -527,8 +633,8 @@ def _model_in_dir(models_dir):
     keeps one manifest per model under manifests/registry.ollama.ai/
     library/<name>/<tag>, and the blobs under blobs/sha256-<hex>.
     A manifest with missing, truncated, or corrupt blobs is not a
-    model - it is a half-moved or half-downloaded one, and restarting
-    from that folder buys nothing, so it counts as not found."""
+    model - it is a half-moved or half-downloaded one, and starting a
+    fallback Ollama from that folder buys nothing, so it counts as not found."""
     ok, _failures = _verify_model_dir(models_dir)
     return ok
 
@@ -542,58 +648,22 @@ def _find_model_dir():
     return found
 
 
-def _stop_ollama():
-    """Stop the Ollama on 11434 and PROVE the port is free. Kills ALL
-    ollama.exe processes (hidden taskkill /F /IM ollama.exe), not just
-    this server's own child and not just the port listener - a stale
-    Ollama from an earlier boot holds the port and a new one cannot
-    bind while it lives. Then polls until port 11434 is actually free
-    (up to 15s) and logs whether it freed. Returns (ok, detail): ok is
-    True only when the port is free; detail names the owning PID and
-    image when it never freed, so the failure is never mistaken for a
-    successful restart."""
-    global _OLLAMA_PROC
-    proc = _OLLAMA_PROC
-    _OLLAMA_PROC = None
-    if proc is not None and proc.poll() is None:
-        try:
-            proc.terminate()
-            proc.wait(timeout=5)
-        except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-    killed, detail = _kill_ollama_processes()
-    if killed:
-        _log("Stopped Ollama: " + detail)
-    for _ in range(15):
-        if _port_free(11434):
-            _log("Old Ollama stopped; port 11434 is free.")
-            return True, "port 11434 is free"
-        time.sleep(1)
-    owner = _port_owner_pid(11434)
-    image = _pid_image_name(owner) if owner else None
-    if owner:
-        msg = ("port 11434 is still held by PID %d%s after killing ollama.exe"
-               % (owner, (" (" + image + ")") if image else ""))
-    else:
-        msg = "port 11434 never freed and its owner could not be determined"
-    _log("Old Ollama would not release port 11434. " + msg + ".")
-    return False, msg
-
-
-def _start_ollama(models_dir):
-    """Start ollama serve from the given model folder and PROVE the new
-    server took over: the child must stay alive AND port 11434 must be
-    owned by that child's PID (when the owner can be determined). The
-    old code returned True as soon as ANY server answered on 11434 -
-    including the stale one that never died - so a restart that never
-    took over looked like a success. Hidden: CREATE_NO_WINDOW, so no
-    console window ever flashes. The child's stderr goes to
+def _start_ollama_on_port(models_dir, port=OLLAMA_FALLBACK_PORT):
+    """Start a SECOND Ollama on the given port (11435) from the given
+    verified model folder, and PROVE it took over: the server on that
+    port must list gemma3:12b. Hidden: CREATE_NO_WINDOW, so no console
+    window ever flashes. The child's stderr goes to
     phi-emma-local.log (never to pythonw's None streams), so a real
-    failure is visible. The process is kept in _OLLAMA_PROC so
-    _stop_ollama can end it directly later. Returns (ok, detail)."""
+    failure is visible. The process is kept in _OLLAMA_PROC.
+
+    The Ollama on 11434 is never touched here - not stopped, not
+    killed, not restarted. If another process already holds this
+    port (Willow started the same 11435 fallback first), this start
+    may fail to bind; that is fine, because the wait below then sees
+    the other server listing the model and counts as success. Both
+    Emma and Willow check "is 11435 already up with the model?" first,
+    so they never start a second 11435 and never fight. Returns
+    (ok, detail)."""
     global _OLLAMA_MISSING, _OLLAMA_PROC
     try:
         err = open(LOG_FILE, "ab")
@@ -601,7 +671,7 @@ def _start_ollama(models_dir):
         err = subprocess.DEVNULL
     try:
         proc = subprocess.Popen(
-            ["ollama", "serve"], env=_ollama_env(models_dir),
+            _ollama_cmd(), env=_ollama_env(models_dir, port=port),
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             stdout=subprocess.DEVNULL, stderr=err)
     except FileNotFoundError:
@@ -613,45 +683,35 @@ def _start_ollama(models_dir):
             pass
         return False, "the ollama command was not found on PATH"
     except Exception as e:
-        _log(f"Could not start Ollama ({e}).")
+        _log(f"Could not start Ollama on port {port} ({e}).")
         try:
             err.close()
         except Exception:
             pass
-        return False, "could not start Ollama (%s)" % e
+        return False, "could not start Ollama on port %d (%s)" % (port, e)
     try:
         err.close()
     except Exception:
         pass
     _OLLAMA_PROC = proc
-    for _ in range(20):
+    for _ in range(30):
+        if _model_present(port, timeout=3):
+            _log(f"Ollama on port {port} lists gemma3:12b from {models_dir}.")
+            return True, "Ollama on port %d lists gemma3:12b from %s" % (port, models_dir)
         if proc.poll() is not None:
-            _log(f"Ollama serve exited at once (code {proc.returncode}). "
+            # The child died. If another server now lists the model on
+            # this port (Willow's 11435, started first), that still
+            # counts - the brain is there, whoever started it.
+            if _model_present(port, timeout=3):
+                _log(f"Ollama on port {port} lists gemma3:12b (started by another process).")
+                return True, "Ollama on port %d lists gemma3:12b" % port
+            _log(f"Ollama serve on port {port} exited at once (code {proc.returncode}). "
                  "See the tail of phi-emma-local.log for its own error.")
-            return False, "Ollama serve exited at once (code %s)" % proc.returncode
-        if _ollama_up(timeout=2):
-            owner = _port_owner_pid(11434)
-            if owner is not None and owner != proc.pid:
-                image = _pid_image_name(owner)
-                _log(f"Port 11434 is owned by PID {owner}"
-                     + (f" ({image})" if image else "")
-                     + f", not the Ollama just started (PID {proc.pid}). "
-                     "The old server never died; stopping the new one.")
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=5)
-                except Exception:
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
-                return False, ("port 11434 is owned by PID %d%s, not the "
-                               "Ollama just started (PID %d)"
-                               % (owner, (" (" + image + ")") if image else "", proc.pid))
-            _log(f"Ollama is up from {models_dir}.")
-            return True, "Ollama is up from %s" % models_dir
+            return False, "Ollama serve on port %d exited at once (code %s)" % (port, proc.returncode)
         time.sleep(1)
-    _log("Ollama started but is not answering after 20s; stopping it.")
+    if _model_present(port, timeout=3):
+        return True, "Ollama on port %d lists gemma3:12b from %s" % (port, models_dir)
+    _log(f"Ollama on port {port} started but does not list gemma3:12b after 30s; stopping it.")
     try:
         proc.terminate()
         proc.wait(timeout=5)
@@ -660,75 +720,63 @@ def _start_ollama(models_dir):
             proc.kill()
         except Exception:
             pass
-    return False, "Ollama started but is not answering after 20s"
+    return False, "Ollama on port %d started but does not list gemma3:12b after 30s" % port
 
 
-def _wait_ollama_model(timeout=30):
-    """Wait up to timeout seconds for Ollama to answer AND have the
-    model. Deadline-based, so a slow /api/tags cannot stretch the wait."""
+def _wait_ollama_model(port=OLLAMA_PRIMARY_PORT, timeout=30):
+    """Wait up to timeout seconds for the Ollama on port to answer AND
+    have the model. Deadline-based, so a slow /api/tags cannot stretch
+    the wait."""
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if _ollama_up(timeout=2) and _model_present(timeout=3):
+        if _ollama_up(port, timeout=2) and _model_present(port, timeout=3):
             return True
         time.sleep(1)
-    return _ollama_up(timeout=2) and _model_present(timeout=3)
-
-
-def _restart_ollama(models_dir):
-    """Stop the old Ollama and start a fresh one from the given model
-    folder, proving both steps. Returns (ok, detail). The restart is
-    only recorded as done when the new Ollama actually took over, so a
-    failed takeover is NOT cooled down - the next Send can try again
-    instead of reporting a stale success."""
-    global _LAST_RESTART_DIR, _LAST_RESTART_AT
-    ok, detail = _stop_ollama()
-    if not ok:
-        return False, detail
-    ok, detail = _start_ollama(models_dir)
-    if not ok:
-        return False, detail
-    _LAST_RESTART_DIR = models_dir
-    _LAST_RESTART_AT = time.time()
-    return True, detail
+    return _ollama_up(port, timeout=2) and _model_present(port, timeout=3)
 
 
 _ENSURE_LOCK = threading.Lock()
 
 
 def _ensure_ollama():
-    """Make sure the SHARED local Ollama is answering AND has gemma3:12b.
-    Willow and Emma share this one brain on 11434 - there is only ever
-    one Ollama, and this server never starts a second one.
+    """Make sure the SHARED local brain is answering AND has gemma3:12b.
+    Willow and Emma share this one brain - the same gemma3:12b, served
+    from whichever Ollama lists it.
 
     The model is already on this PC; the serving Ollama just cannot see
     it, because it was started pointing at a folder that does not hold
     it. So this heal FINDS the model on disk instead of downloading it
     again. There is no download anywhere in this file. The scan
     verifies EVERY blob (size and SHA-256), so a truncated copy is
-    rejected and named, never restarted from.
-    - Ollama up and the model in it: nothing to do.
-    - Ollama up but the model missing: scan the folders for a complete,
-      verified copy. If a folder has it, restart Ollama ONCE from that
-      folder - and PROVE the restart took over (the port must free, the
-      new server must own it, and the model must list). If the port
-      never frees, or the model still is not listed after a verified
-      restart, say exactly which step failed - do not pretend the
-      restart worked. If no folder has a complete copy, say so plainly
-      (which folders, which blobs) and stop - a restart buys nothing
+    rejected and named, never started from.
+    - 11434 lists the model: nothing to do (normal path, unchanged).
+    - 11435 already lists the model (Willow started the fallback
+      first): nothing to do - use 11435, start nothing.
+    - Neither lists it: scan the folders for a complete, verified
+      copy. If a folder has it, start a SECOND Ollama on 11435 from
+      that folder - and PROVE it lists the model. The Ollama on 11434
+      is never killed, never restarted, never fought: it was tried,
+      it does not die (its port never frees, its owner cannot be
+      determined), so it is left alone, idle. If the 11435 start
+      fails, say exactly which step failed - do not pretend it
+      worked. If no folder has a complete copy, say so plainly
+      (which folders, which blobs) and stop - a start buys nothing
       and a download is never attempted.
-    - Ollama down: start it hidden, pointing at the folder the scan
-      found (or D: by default). One Ollama only.
-    A restart is never repeated for the same folder within five minutes
-    when it actually took over and still did not help, and a "not on
+    - Ollama down entirely: same 11435 start from the folder the
+      scan found (or D: by default, verified first).
+    A 11435 start is never repeated for the same folder within five
+    minutes when it started and still did not help, and a "not on
     disk" verdict is not rescanned for a minute - so pressing Send
-    cannot restart Ollama over and over. A FAILED takeover is not
-    cooled down: the next Send can try again. Never fatal and never
-    blocks the server from answering: the page answers from second zero
-    and the chat route reports the true state."""
+    cannot start Ollama over and over. A FAILED start is not cooled
+    down: the next Send can try again. Never fatal and never blocks
+    the server from answering: the page answers from second zero and
+    the chat route reports the true state."""
     global _LAST_HEAL_ERROR, _LAST_HEAL_AT, _LAST_HEAL_RESULT
+    global _LAST_FALLBACK_DIR, _LAST_FALLBACK_AT
+    global _ACTIVE_OLLAMA_PORT, _ACTIVE_OLLAMA_URL
     with _ENSURE_LOCK:
         now = time.time()
-        if _ollama_up(timeout=2) and _model_present(timeout=3):
+        if _resolve_brain_port() is not None:
             _LAST_HEAL_ERROR = None
             _LAST_HEAL_RESULT = "ready"
             return True
@@ -738,68 +786,52 @@ def _ensure_ollama():
             return False
         _LAST_HEAL_AT = now
         _LAST_HEAL_ERROR = None
-        if _ollama_up(timeout=2):
-            found, report = _scan_model_dirs()
-            _log_scan_report(report)
-            if found is None:
-                _LAST_HEAL_ERROR = (
-                    "gemma3:12b is not complete in either model folder. "
-                    + " | ".join(report) + ". I never download.")
-                _LAST_HEAL_RESULT = "no_model_on_disk"
-                _log("Ollama is up but gemma3:12b is not in it, and the model "
-                     "is in neither model folder on disk. Not restarting, "
-                     "not downloading.")
-                return False
-            if found == _LAST_RESTART_DIR and now - _LAST_RESTART_AT < _RESTART_COOLDOWN:
-                _LAST_HEAL_ERROR = (
-                    "Ollama was already restarted from " + found +
-                    " and gemma3:12b still is not in it.")
-                _LAST_HEAL_RESULT = "restart_no_help"
-                return False
-            _log("Ollama is up but gemma3:12b is not in it. The model is on "
-                 "disk at " + found + ". Restarting Ollama from there.")
-            ok, detail = _restart_ollama(found)
-            if not ok:
-                _LAST_HEAL_ERROR = "Ollama could not be restarted: " + detail
-                _LAST_HEAL_RESULT = "start_failed"
-                _log("The restart did not take over: " + detail)
-                return False
-            if _wait_ollama_model(30):
-                _LAST_HEAL_RESULT = "ready"
-                _log("Ollama is up from the folder that holds gemma3:12b.")
-                return True
-            _LAST_HEAL_ERROR = (
-                "Ollama was restarted from " + found +
-                " and the model still is not in it, even though the folder "
-                "was verified complete and the new Ollama owns port 11434.")
-            _LAST_HEAL_RESULT = "restart_no_help"
-            _log("gemma3:12b is still missing after a verified restart from "
-                 + found + ".")
-            return False
+        if _ollama_up(OLLAMA_PRIMARY_PORT, timeout=2):
+            # 11434 is up but does not list the model. Diagnose who
+            # holds it (for the log only), then leave it alone.
+            _diagnose_port_owner(OLLAMA_PRIMARY_PORT)
+            _log("Ollama on 11434 is up but gemma3:12b is not in it. "
+                 "Leaving 11434 alone; the fallback on 11435 will serve the brain.")
         found, report = _scan_model_dirs()
         _log_scan_report(report)
-        models_dir = found or OLLAMA_MODELS_DIR
-        _log("Ollama is not answering. Starting it from " + models_dir + ".")
-        ok, detail = _start_ollama(models_dir)
-        if not ok:
-            _LAST_HEAL_ERROR = "Ollama is not running and could not be started: " + detail
-            _LAST_HEAL_RESULT = "start_failed"
-            return False
-        if _wait_ollama_model(30):
-            _LAST_HEAL_RESULT = "ready"
-            _log("Ollama is up and gemma3:12b is present.")
-            return True
         if found is None:
             _LAST_HEAL_ERROR = (
                 "gemma3:12b is not complete in either model folder. "
                 + " | ".join(report) + ". I never download.")
             _LAST_HEAL_RESULT = "no_model_on_disk"
-        else:
+            _log("Neither Ollama lists gemma3:12b, and the model is in "
+                 "neither model folder on disk. Not starting a fallback, "
+                 "not downloading.")
+            return False
+        if found == _LAST_FALLBACK_DIR and now - _LAST_FALLBACK_AT < _FALLBACK_COOLDOWN:
             _LAST_HEAL_ERROR = (
-                "Ollama was started from " + found +
-                " and gemma3:12b still is not in it, even though the folder "
-                "was verified complete.")
-            _LAST_HEAL_RESULT = "restart_no_help"
+                "A second Ollama was already started on 11435 from " + found +
+                " and gemma3:12b still is not in it.")
+            _LAST_HEAL_RESULT = "fallback_no_help"
+            return False
+        _log("gemma3:12b is on disk at " + found +
+             ". Starting a second Ollama on 11435 from there; 11434 is left alone.")
+        ok, detail = _start_ollama_on_port(found, OLLAMA_FALLBACK_PORT)
+        if not ok:
+            _LAST_HEAL_ERROR = "The second Ollama on 11435 could not be started: " + detail
+            _LAST_HEAL_RESULT = "start_failed"
+            _log("The 11435 fallback did not come up: " + detail)
+            return False
+        _LAST_FALLBACK_DIR = found
+        _LAST_FALLBACK_AT = time.time()
+        if _wait_ollama_model(OLLAMA_FALLBACK_PORT, 30):
+            _ACTIVE_OLLAMA_PORT = OLLAMA_FALLBACK_PORT
+            _ACTIVE_OLLAMA_URL = _ollama_chat_url(OLLAMA_FALLBACK_PORT)
+            _LAST_HEAL_RESULT = "ready"
+            _log("The brain is back on 11435 from the folder that holds gemma3:12b.")
+            return True
+        _LAST_HEAL_ERROR = (
+            "A second Ollama was started on 11435 from " + found +
+            " and the model still is not in it, even though the folder "
+            "was verified complete.")
+        _LAST_HEAL_RESULT = "fallback_no_help"
+        _log("gemma3:12b is still missing after starting the 11435 fallback from "
+             + found + ".")
         return False
 
 
@@ -824,7 +856,7 @@ def _heal_worker():
 def _kick_heal():
     """Start the brain heal in a background thread if it is not already
     running. Never blocks the caller: the page keeps answering while
-    Ollama is restarted or the model is found."""
+    the fallback Ollama is started or the model is found."""
     global _HEAL_RUNNING
     with _HEAL_LOCK:
         if _HEAL_RUNNING:
@@ -833,9 +865,14 @@ def _kick_heal():
     threading.Thread(target=_heal_worker, daemon=True).start()
     return True
 
-def _ollama_chat(messages, num_predict=377):
+def _ollama_chat(messages, num_predict=377, url=None):
     """One chat turn against local Ollama. Returns the reply text.
-    Raises RuntimeError with a plain reason on any failure."""
+    Raises RuntimeError with a plain reason on any failure. The URL
+    is the resolved brain URL (11434 normally, 11435 when the
+    fallback is serving the brain); when none is given it is resolved
+    fresh, so a chat never talks to the stuck 11434 by default."""
+    if url is None:
+        url = _resolve_brain_url() or _ACTIVE_OLLAMA_URL
     try:
         num_predict = int(num_predict)
     except (TypeError, ValueError):
@@ -853,7 +890,7 @@ def _ollama_chat(messages, num_predict=377):
         },
     }
     req = urllib.request.Request(
-        OLLAMA_URL, data=json.dumps(payload).encode(),
+        url, data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json"})
     try:
         resp = urllib.request.urlopen(req, timeout=600)
@@ -863,7 +900,7 @@ def _ollama_chat(messages, num_predict=377):
         except Exception:
             body = ""
         raise RuntimeError(
-            f"Ollama {OLLAMA_URL} said HTTP {e.code} for model {MODEL}: {body}")
+            f"Ollama {url} said HTTP {e.code} for model {MODEL}: {body}")
     except Exception as e:
         raise RuntimeError(f"Ollama did not answer ({e}). Is it running?")
     parts = []
@@ -1018,13 +1055,20 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/":
             self._send_file(TALK_FILE, "text/html; charset=utf-8")
         elif parsed.path == "/api/status":
+            brain_port = _resolve_brain_port()
             self._send_json(200, {
                 "ok": True,
                 "local": True,
                 "nuance": False,
                 "model": MODEL,
-                "ollama_up": _ollama_up(timeout=2),
-                "model_present": _model_present(timeout=3),
+                "ollama_up": _ollama_up(OLLAMA_PRIMARY_PORT, timeout=2),
+                "model_present": _model_present(OLLAMA_PRIMARY_PORT, timeout=3),
+                "ollama_primary_up": _ollama_up(OLLAMA_PRIMARY_PORT, timeout=2),
+                "model_present_primary": _model_present(OLLAMA_PRIMARY_PORT, timeout=3),
+                "ollama_fallback_up": _ollama_up(OLLAMA_FALLBACK_PORT, timeout=2),
+                "model_present_fallback": _model_present(OLLAMA_FALLBACK_PORT, timeout=3),
+                "active_ollama_port": brain_port,
+                "active_ollama_url": _ollama_chat_url(brain_port) if brain_port else None,
                 "model_dir": _find_model_dir(),
                 "model_dirs_checked": list(MODEL_DIRS),
                 "kokoro_files": _kokoro_ready(),
@@ -1086,26 +1130,28 @@ class Handler(BaseHTTPRequestHandler):
         # Fast check only - never block the reply on the heal. The heal
         # runs in a background thread (see main); this route just reports
         # whether the brain is ready right now and kicks the heal if not.
-        # The old code called _ensure_ollama() here, which can hold its
-        # lock for 30+ seconds while the heal restarts Ollama - a chat
-        # sent during the heal would hang instead of getting its 503.
+        # The brain is ready when EITHER Ollama lists the model: 11434
+        # normally, 11435 when the fallback is serving it. The old code
+        # only checked 11434, so a working 11435 brain still got a 503.
         # The errors name the true state and never tell Tyree to start
-        # Ollama or download anything himself - the server does it.
-        if not (_ollama_up(timeout=2) and _model_present(timeout=3)):
+        # Ollama, check a folder, or download anything himself - the
+        # server brings the brain back on its own.
+        brain_url = _resolve_brain_url()
+        if not brain_url:
             _kick_heal()
             if _OLLAMA_MISSING:
                 self._send_json(503, {"error": "Her brain cannot start: the Ollama program was not found on this PC. The detail is in phi-emma-local.log."})
-            elif not _ollama_up(timeout=2):
-                self._send_json(503, {"error": "Ollama is not running - I am starting it now. Send again in a moment."})
+            elif not _ollama_up(OLLAMA_PRIMARY_PORT, timeout=2) and not _ollama_up(OLLAMA_FALLBACK_PORT, timeout=2):
+                self._send_json(503, {"error": "Her brain is not running yet - I am bringing it back now. Send again in a moment."})
             elif _LAST_HEAL_ERROR:
                 self._send_json(503, {"error": f"Her brain could not be brought back ({_LAST_HEAL_ERROR}). The detail is in phi-emma-local.log - Send again and I will try once more."})
             elif _HEAL_RUNNING:
-                self._send_json(503, {"error": "Her brain is not in the Ollama that is running yet. I am checking the folders on this PC for it. Send again in a moment."})
+                self._send_json(503, {"error": "Her brain is not in the Ollama that is running yet. I am bringing up a second Ollama from the folder that has it - no need to check anything. Send again in a moment."})
             else:
-                self._send_json(503, {"error": "Her brain is not in the Ollama that is running. I am pointing Ollama at the folder that has it. Send again in a moment."})
+                self._send_json(503, {"error": "Her brain is not in the Ollama that is running. I am bringing up a second Ollama from the folder that has it. Send again in a moment."})
             return
         try:
-            reply = _ollama_chat(messages, num_predict=body.get("num_predict", 377))
+            reply = _ollama_chat(messages, num_predict=body.get("num_predict", 377), url=brain_url)
         except RuntimeError as e:
             _log(f"Chat failed ({e}); kicking the heal.")
             _kick_heal()

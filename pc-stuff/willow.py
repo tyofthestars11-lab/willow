@@ -32,8 +32,27 @@ NOISE_MULT = PHI ** 2                   # speech = noise floor x 2.618
 MIN_THRESHOLD = 0.01
 
 # ---------- model settings ----------
+# The brain is whichever Ollama lists gemma3:12b - 11434 normally,
+# 11435 when the fallback is serving it (see willow_type / Emma's
+# server: the stuck 11434 is never killed, a second Ollama on 11435
+# serves the brain instead). Resolved fresh per think().
 OLLAMA_URL = "http://localhost:11434/api/chat"
+OLLAMA_FALLBACK_URL = "http://localhost:11435/api/chat"
 LLM_MODEL = "gemma3:12b"
+
+
+def _brain_url():
+    for base in ("http://127.0.0.1:11434", "http://127.0.0.1:11435"):
+        try:
+            with urllib.request.urlopen(base + "/api/tags", timeout=3) as r:
+                data = json.loads(r.read().decode("utf-8", "replace"))
+            for m in data.get("models", []):
+                name = m.get("name", "")
+                if name == LLM_MODEL or name.startswith(LLM_MODEL + ":"):
+                    return base + "/api/chat"
+        except Exception:
+            continue
+    return OLLAMA_URL
 WHISPER_MODEL = "base.en"
 WAKE_WORDS = ("willow", "willa", "willo", "will o")
 HISTORY_TURNS = 8
@@ -161,7 +180,7 @@ class Willow:
             "keep_alive": -1, "options": {"temperature": 1 - 1 / PHI, "num_predict": 144},
         }
         req = urllib.request.Request(
-            OLLAMA_URL,
+            _brain_url(),
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"},
         )
@@ -169,7 +188,7 @@ class Willow:
             with urllib.request.urlopen(req, timeout=120) as resp:
                 content = json.loads(resp.read())["message"]["content"]
         except Exception as e:
-            return {"say": "I can't reach Ollama. Is it running?", "command": ""}, f"error: {e}"
+            return {"say": "My brain isn't back yet - I'm bringing it up myself, try again in a moment.", "command": ""}, f"error: {e}"
         try:
             reply = json.loads(content)
         except json.JSONDecodeError:
