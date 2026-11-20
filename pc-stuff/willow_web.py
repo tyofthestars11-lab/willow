@@ -1,7 +1,7 @@
 ﻿# willow_web.py - Willow with read-only internet. Type to her; she searches
 # the web when she needs to, reads the top 5 results, and answers.
 # Web text can never trigger a command. Commands still need your y.
-import ast, json, math, operator, os, re, subprocess, urllib.parse, urllib.request
+import ast, json, math, operator, os, re, subprocess, urllib.error, urllib.parse, urllib.request
 import willow_type as w
 
 # Phi framework: the full thing. Willow's working copy (phi-framework.md) plus the
@@ -104,7 +104,19 @@ def _stream_chat(payload, timeout=600):
     req = urllib.request.Request(w.OLLAMA_URL, data=json.dumps(payload).encode(),
                                  headers={"Content-Type": "application/json"})
     parts = []
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    try:
+        resp = urllib.request.urlopen(req, timeout=timeout)
+    except urllib.error.HTTPError as e:
+        # Ollama answers 404 when the model is not in the serving instance's
+        # store (wrong model folder). Name the URL, the model, and Ollama's
+        # own reason, so the Guard can say what actually failed.
+        try:
+            detail = e.read().decode("utf-8", "ignore")[:300]
+        except Exception:
+            detail = ""
+        raise RuntimeError(
+            f"Ollama {w.OLLAMA_URL} said HTTP {e.code} for model {payload.get('model')}: {detail or e}")
+    with resp as resp:
         for line in resp:
             line = line.strip()
             if not line:

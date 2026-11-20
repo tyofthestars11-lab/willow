@@ -36,6 +36,7 @@ import willow_web as ww
 import willow_eyes as we
 import willow_launch as wl
 import willow_telemetry
+import willow_ears as we_ears
 
 w = ww.w
 w.LLM_MODEL = "gemma3:12b"  # bigger brain, same as the Command Center
@@ -271,6 +272,11 @@ def _place_chat():
 
 def _show_bubble():
     _mode["chat"] = False
+    try:
+        we_ears.pause_listening()
+    except Exception:
+        pass
+    UIQ.put(("ears", "off"))
     chat.pack_forget()
     bubble.pack(fill="both", expand=True)
     _place_bubble()
@@ -282,6 +288,13 @@ def _show_chat():
     chat.pack(fill="both", expand=True)
     _place_chat()
     entry.focus_set()
+    # Joining her turns her ears on. They stay on only while we're open.
+    try:
+        we_ears.start_listening(respond, say, w)
+        UIQ.put(("ears", "listening"))
+    except Exception as e:
+        UIQ.put(("ears", "off"))
+        UIQ.put(("say", "Guard", f"Mic didn't start ({e}). Type instead — I still talk back."))
 
 
 def _quit():
@@ -403,7 +416,7 @@ def _build_ui():
     head = tk.Frame(chat, bg=PANEL)
     head.pack(fill="x")
     tk.Label(head, text="φ  WILLOW", fg=GOLD2, bg=PANEL, font=FONT_B).pack(side="left", padx=8, pady=6)
-    mic_lbl = tk.Label(head, text="● Starting…", fg=DIM, bg=PANEL, font=("Consolas", 9))
+    mic_lbl = tk.Label(head, text="● Ears off", fg=DIM, bg=PANEL, font=("Consolas", 9))
     mic_lbl.pack(side="left", padx=4)
     tk.Button(head, text="×", fg=RED, bg=PANEL, bd=0, font=FONT_B, command=_quit).pack(side="right", padx=4)
     tk.Button(head, text="—", fg=DIM, bg=PANEL, bd=0, font=FONT_B, command=_show_bubble).pack(side="right")
@@ -448,7 +461,7 @@ def _build_ui():
 
     status_lbl = tk.Label(chat, text="Starting…", fg=DIM, bg=BG, font=("Consolas", 9), anchor="w")
     status_lbl.pack(fill="x", padx=10, pady=(0, 6))
-    tk.Label(chat, text="Say “Willow” or type — DLAM on, phi first, all local.",
+    tk.Label(chat, text="I listen only while we're open — talk or type. DLAM on, phi first, all local.",
              fg=DIM, bg=BG, font=("Consolas", 9), anchor="w").pack(fill="x", padx=10, pady=(0, 8))
 
     bubble.pack(fill="both", expand=True)
@@ -464,9 +477,41 @@ def _ollama_up(timeout=2):
         return False
 
 
+def _model_present(timeout=3):
+    # The server answering /api/ps only proves a server is up — not that it
+    # has the brain. Ollama answers 404 for a model that is not in the
+    # serving instance's store (wrong model folder), so check the model too.
+    try:
+        with urllib.request.urlopen("http://localhost:11434/api/tags", timeout=timeout) as r:
+            data = json.loads(r.read())
+        names = [m.get("name", "") for m in data.get("models", [])]
+        return any(n == w.LLM_MODEL or n.startswith(w.LLM_MODEL + ":") for n in names)
+    except Exception:
+        return False
+
+
+def _stop_ollama():
+    # Stop whatever holds port 11434 so a fresh server can start from the
+    # right model folder. The one running may serve the stale C: copy.
+    try:
+        subprocess.run(["powershell", "-NoProfile", "-Command",
+                        "$c = Get-NetTCPConnection -LocalPort 11434 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; if ($c) { Stop-Process -Id $c.OwningProcess -Force }"],
+                       capture_output=True, timeout=15)
+    except Exception:
+        pass
+    for _ in range(10):
+        time.sleep(1)
+        if not _ollama_up():
+            return True
+    return not _ollama_up()
+
+
 def _ensure_ollama():
-    if _ollama_up():
+    if _ollama_up() and _model_present():
         return True
+    # Server down, or up but serving the wrong model folder so gemma3:12b is
+    # missing and every answer 404s. Restart it from the right folder.
+    _stop_ollama()
     env = dict(os.environ)
     env["OLLAMA_MODELS"] = r"D:\PhiMove\.ollama\models"
     env["OLLAMA_KEEP_ALIVE"] = "-1"
@@ -479,8 +524,9 @@ def _ensure_ollama():
         return False
     for _ in range(30):
         time.sleep(1)
-        if _ollama_up():
+        if _ollama_up() and _model_present():
             return True
+    UIQ.put(("say", "Guard", "Ollama is up but gemma3:12b is not in its model folder. Check D:\\PhiMove\\.ollama\\models, then restart me."))
     return False
 
 
@@ -500,14 +546,14 @@ def _boot():
                 UIQ.put(("say", "Guard", "Note: the Command Center site is also running — she'll answer in both places. Close that window for widget-only."))
     except Exception:
         pass
+    # Voice only at boot. Her ears stay OFF until Tyree joins her by
+    # opening the chat — she never listens just because the mic is on.
     try:
-        import willow_ears as we_ears
-        UIQ.put(("ears", "starting…"))
-        we_ears.start(respond, say, w)
+        we_ears.start_voice(w)
     except Exception as e:
-        UIQ.put(("ears", "off"))
-        UIQ.put(("say", "Guard", f"Mic didn't start ({e}). Type instead — I still talk back."))
-    say("I'm here, Tyree. Talk to me or type — I'm listening.")
+        UIQ.put(("say", "Guard", f"Voice didn't start ({e}). Text still works."))
+    UIQ.put(("ears", "off"))
+    say("I'm here, Tyree. Click me to talk — I only listen when we're open. Or just type.")
 
 
 def main():
