@@ -313,7 +313,7 @@
       return LivekitClient.createLocalAudioTrack({ echoCancellation: true });
     }).then(function (micTrack) {
       localTracks.push(micTrack);
-      return room.publishTrack(micTrack);
+      return room.localParticipant.publishTrack(micTrack);
     }).then(function () {
       logEvent("microphone published");
       if (cameraOn) return enableCamera();
@@ -327,7 +327,7 @@
     return LivekitClient.createLocalVideoTrack().then(function (track) {
       cameraTrack = track;
       localTracks.push(track);
-      return room.publishTrack(track);
+      return room.localParticipant.publishTrack(track);
     }).then(function () {
       camBtn.textContent = "Camera: on";
       logEvent("camera published");
