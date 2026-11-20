@@ -21,13 +21,24 @@
   .phi { color: #e9b949; font-weight: bold; }
   main { width: min(880px, 94vw); padding: 12px 0 40px; }
   .stage {
+    position: relative;
     border: 1px solid #6b5320; border-radius: 16px; overflow: hidden;
     background: #171204; box-shadow: 0 0 40px rgba(233,185,73,.12);
   }
   video {
-    display: block; width: 100%; aspect-ratio: 16/9; background: #000;
+    display: block; width: 100%; aspect-ratio: 16/9; background: #171204;
     object-fit: cover;
   }
+  .video-placeholder {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; text-align: center;
+    background: radial-gradient(circle at 50% 42%, #3a2a08 0%, #171204 68%);
+    color: #e9b949; padding: 16px; z-index: 2;
+  }
+  .video-placeholder .phi-mark { font-size: 84px; line-height: 1; text-shadow: 0 0 32px rgba(233,185,73,.65); }
+  .video-placeholder .name { font-size: 26px; letter-spacing: 8px; margin-top: 10px; }
+  .video-placeholder .joining { color: #c9a86a; font-style: italic; margin-top: 8px; font-size: 16px; }
+  .video-placeholder.hidden { display: none; }
   .controls {
     display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
     padding: 14px 16px; border-top: 1px solid #6b5320;
@@ -69,6 +80,11 @@
 <main>
   <div class="stage">
     <video id="avatarVideo" autoplay playsinline muted></video>
+    <div class="video-placeholder" id="videoPlaceholder">
+      <div class="phi-mark">&phi;</div>
+      <div class="name">EMMA</div>
+      <div class="joining" id="placeholderStatus">Press Start to talk to her.</div>
+    </div>
     <audio id="avatarAudio" autoplay></audio>
     <div class="controls">
       <button id="startBtn">Start — talk to Emma</button>
@@ -110,6 +126,9 @@
   var logEl = document.getElementById("eventLog");
   var videoEl = document.getElementById("avatarVideo");
   var audioEl = document.getElementById("avatarAudio");
+  var placeholderEl = document.getElementById("videoPlaceholder");
+  var placeholderStatus = document.getElementById("placeholderStatus");
+  var avatarVideoOn = false;
 
   var token = null;
   var conversationId = null;
@@ -126,6 +145,28 @@
   var pollTimer = null;
 
   function setStatus(text) { statusEl.textContent = text; }
+  function showPlaceholder(text) {
+    if (text) placeholderStatus.textContent = text;
+    placeholderEl.classList.remove("hidden");
+  }
+  function hidePlaceholder() { placeholderEl.classList.add("hidden"); }
+  function attachAvatarTrack(track) {
+    if (track.kind === LivekitClient.Track.Kind.Video) {
+      track.attach(videoEl);
+      avatarVideoOn = true;
+      hidePlaceholder();
+    } else if (track.kind === LivekitClient.Track.Kind.Audio) {
+      track.attach(audioEl);
+    }
+  }
+  function attachExistingAvatarTracks() {
+    if (!room) return;
+    room.remoteParticipants.forEach(function (p) {
+      p.trackPublications.forEach(function (pub) {
+        if (pub.track) attachAvatarTrack(pub.track);
+      });
+    });
+  }
   function showError(text) { errorEl.textContent = text; }
   function clearError() { errorEl.textContent = ""; }
   function logEvent(text) {
@@ -201,6 +242,7 @@
     var type = obj.type || "";
     if (type === "session.started") {
       setStatus("Live — she is listening. Talk.");
+      if (!avatarVideoOn) showPlaceholder("She is here — talk. Her video is joining...");
       logEvent("session started" + (obj.seconds_remaining ? " (" + obj.seconds_remaining + "s left)" : ""));
       publishInterfaceEvent({
         type: "response.create",
@@ -249,16 +291,22 @@
     }
     room = new LivekitClient.Room();
     room.on(LivekitClient.RoomEvent.TrackSubscribed, function (track, publication, participant) {
-      if (track.kind === LivekitClient.Track.Kind.Video) track.attach(videoEl);
-      if (track.kind === LivekitClient.Track.Kind.Audio) track.attach(audioEl);
+      attachAvatarTrack(track);
     });
-    room.on(LivekitClient.RoomEvent.TrackUnsubscribed, function (track) { track.detach(); });
+    room.on(LivekitClient.RoomEvent.TrackUnsubscribed, function (track) {
+      track.detach();
+      if (track.kind === LivekitClient.Track.Kind.Video) {
+        avatarVideoOn = false;
+        showPlaceholder("Emma stepped away — press Start to talk again.");
+      }
+    });
     room.on(LivekitClient.RoomEvent.DataReceived, handleRoomData);
     room.on(LivekitClient.RoomEvent.Disconnected, function () {
       if (running) hangup("Disconnected from her room.");
     });
     return room.connect(livekitUrl, livekitToken).then(function () {
       logEvent("joined her LiveKit room");
+      attachExistingAvatarTracks();
       return LivekitClient.createLocalAudioTrack({ echoCancellation: true });
     }).then(function (micTrack) {
       localTracks.push(micTrack);
@@ -357,6 +405,8 @@
     cameraTrack = null;
     cameraOn = false;
     camBtn.textContent = "Camera: off";
+    avatarVideoOn = false;
+    showPlaceholder("Press Start to talk to her.");
     try { videoEl.srcObject = null; } catch (e) {}
     try { audioEl.srcObject = null; } catch (e) {}
   }
@@ -398,6 +448,8 @@
     transcriptEl.innerHTML = "";
     currentTurn = null;
     setStatus("Minting her token from this PC...");
+    avatarVideoOn = false;
+    showPlaceholder("Emma is joining...");
     logEvent("start pressed");
 
     fetch("/api/token").then(function (resp) {

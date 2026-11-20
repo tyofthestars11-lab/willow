@@ -193,7 +193,7 @@ def main():
         log("No API key file yet: %s" % key_file_path())
         log("Create that file with your Nuance key on one line, then press Start.")
     server = ThreadingHTTPServer((HOST, PORT), Handler)
-    log("Phi Emma live at http://%s:%d - press Start on the page, she mints her own token." % (HOST, PORT))
+    log("Phi Emma live at http://%s:%d - serving %s - press Start on the page, she mints her own token." % (HOST, PORT, BASE_DIR))
     try:
         server.serve_forever()
     except KeyboardInterrupt:
