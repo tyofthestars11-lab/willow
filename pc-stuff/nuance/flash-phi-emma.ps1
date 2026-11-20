@@ -66,33 +66,46 @@ if (-not (Test-Path $KeyFile)) {
     Write-Host "API key file is in place."
 }
 
-# 4. Desktop shortcut for the launcher.
+# 4. Desktop shortcut for the launcher. WindowStyle 7 runs it minimized,
+# so clicking the shortcut never flashes a console window.
 $W = New-Object -ComObject WScript.Shell
 $S = $W.CreateShortcut("$env:USERPROFILE\Desktop\Phi Emma.lnk")
 $S.TargetPath = "$Live\start-phi-emma.bat"
 $S.WorkingDirectory = $Live
+$S.WindowStyle = 7
 $S.Save()
 
 # 5. Add her to Windows Startup so she launches on login.
 Copy-Item "$env:USERPROFILE\Desktop\Phi Emma.lnk" "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\Phi Emma.lnk" -Force
 
-# 6. Start her. The launcher waits until her page answers and opens it
-# in the browser, so wait for it to finish before checking she is live.
-Start-Process "$Live\start-phi-emma.bat" -Wait
+# 6. Start her, hidden. The launcher starts the server and hands the
+# wait-and-open to a hidden shell, then exits at once - so run it hidden
+# and wait for it to finish before checking she is live.
+Start-Process "$Live\start-phi-emma.bat" -WindowStyle Hidden -Wait
 
 # 7. Quick check that she answers - BOTH the page and the LiveKit bundle.
 # The old check only asked for the page, which even a stale old server
 # answers, so it reported "live" while her video could never join.
+# Both checks are retried briefly: the launcher exits at once now, and
+# the server can take a moment to bind after starting.
 $PageOk = $false
 $BundleOk = $false
-try {
-    $r = Invoke-WebRequest -Uri 'http://127.0.0.1:1619/' -UseBasicParsing -TimeoutSec 5
-    if ($r.StatusCode -eq 200) { $PageOk = $true }
-} catch { }
-try {
-    $r = Invoke-WebRequest -Uri 'http://127.0.0.1:1619/livekit-client.umd.js' -UseBasicParsing -TimeoutSec 5
-    if ($r.StatusCode -eq 200) { $BundleOk = $true }
-} catch { }
+for ($i = 0; $i -lt 15; $i++) {
+    if (-not $PageOk) {
+        try {
+            $r = Invoke-WebRequest -Uri 'http://127.0.0.1:1619/' -UseBasicParsing -TimeoutSec 5
+            if ($r.StatusCode -eq 200) { $PageOk = $true }
+        } catch { }
+    }
+    if (-not $BundleOk) {
+        try {
+            $r = Invoke-WebRequest -Uri 'http://127.0.0.1:1619/livekit-client.umd.js' -UseBasicParsing -TimeoutSec 5
+            if ($r.StatusCode -eq 200) { $BundleOk = $true }
+        } catch { }
+    }
+    if ($PageOk -and $BundleOk) { break }
+    Start-Sleep -Seconds 2
+}
 if ($PageOk -and $BundleOk) {
     Write-Host "Phi Emma is live at http://127.0.0.1:1619 - open it and press Start."
 } else {
