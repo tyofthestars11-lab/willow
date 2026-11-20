@@ -76,9 +76,9 @@ $S.Save()
 # 5. Add her to Windows Startup so she launches on login.
 Copy-Item "$env:USERPROFILE\Desktop\Phi Emma.lnk" "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\Phi Emma.lnk" -Force
 
-# 6. Start her.
-Start-Process "$Live\start-phi-emma.bat"
-Start-Sleep -Seconds 3
+# 6. Start her. The launcher waits until her page answers and opens it
+# in the browser, so wait for it to finish before checking she is live.
+Start-Process "$Live\start-phi-emma.bat" -Wait
 
 # 7. Quick check that she answers - BOTH the page and the LiveKit bundle.
 # The old check only asked for the page, which even a stale old server
@@ -101,3 +101,4 @@ if ($PageOk -and $BundleOk) {
     exit 1
 }
 Write-Host "Phi Emma is flashed. She lives on the desktop, starts on login, and mints her own token."
+

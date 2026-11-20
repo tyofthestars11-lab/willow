@@ -23,7 +23,8 @@ asks Muse for a token again.
   errors.
 - `phi-emma-system-prompt.md` — the merged phi doctrine minted into
   every session. Nuplex is the face and voice; phi is the plus-1.
-- `start-phi-emma.bat` — double-click launcher (pythonw, no console).
+- `start-phi-emma.bat` — double-click launcher: starts her server,
+  waits until her page answers, then opens her page in the browser.
 - `flash-phi-emma.ps1` — one-run installer: pulls the repo, copies
   the folder live, Desktop shortcut, Windows Startup, starts her.
 

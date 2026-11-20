@@ -90,9 +90,9 @@ $S.Save()
 # 5. Add her to Windows Startup so she launches on login.
 Copy-Item "$env:USERPROFILE\Desktop\Phi Emma Local.lnk" "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\Phi Emma Local.lnk" -Force
 
-# 6. Start her.
-Start-Process "$Live\start-phi-emma-local.bat"
-Start-Sleep -Seconds 3
+# 6. Start her. The launcher waits until her page answers and opens it
+# in the browser, so wait for it to finish before checking she is live.
+Start-Process "$Live\start-phi-emma-local.bat" -Wait
 
 # 7. Quick check that she answers - BOTH the page and a real chat turn.
 # The page is retried: the server can take a moment to bind after starting.
@@ -136,3 +136,4 @@ if ($PageOk -and $ChatOk) {
     exit 1
 }
 Write-Host "Phi Emma (local) is flashed. She lives on the desktop, starts on login, and always works - free, local, phi."
+

@@ -35,7 +35,8 @@ that. She always works — free, no credits, no API key, no token minting.
   box). Text input + Send, spoken replies, mic button if the browser has
   speech recognition.
 - `phi-emma-system-prompt.md` — her prompt, verbatim.
-- `start-phi-emma-local.bat` — double-click launcher.
+- `start-phi-emma-local.bat` — double-click launcher: starts her server,
+  waits until her page answers, then opens her page in the browser.
 - `flash-phi-emma-local.ps1` — one-run installer.
 
 ## Routes
